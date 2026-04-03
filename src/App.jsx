@@ -1257,6 +1257,15 @@ function SettingsPage({
               Sign in with your email OTP to sync the same cloud data across phone and laptop.
               Your <strong>app PIN</strong> below still only locks this device UI.
             </p>
+            <p className="helper">
+              Supabase may email a magic link and/or a one-time code. Prefer entering the code here.
+              Magic links use this site’s address (e.g. Vite <code>http://localhost:5173</code>); in the
+              Supabase dashboard open <strong>Authentication → URL Configuration</strong> and set{' '}
+              <strong>Site URL</strong> to match, and add the same origin under{' '}
+              <strong>Redirect URLs</strong> (e.g. <code>http://localhost:5173/**</code>). If links pointed
+              at <code>localhost:3000</code>, update those settings or set{' '}
+              <code>VITE_SUPABASE_REDIRECT_URL</code> in <code>.env.local</code>.
+            </p>
             <div>
               <div className="inline-form">
                 <input

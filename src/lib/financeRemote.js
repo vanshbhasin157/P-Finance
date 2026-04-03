@@ -2,6 +2,18 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 
 export { isSupabaseConfigured }
 
+/** Where email magic links should send the user (must be listed in Supabase Auth → URL Configuration). */
+function getEmailRedirectTo() {
+  const fromEnv = import.meta.env.VITE_SUPABASE_REDIRECT_URL
+  if (fromEnv && String(fromEnv).trim().startsWith('http')) {
+    return String(fromEnv).trim().replace(/\/$/, '') + '/'
+  }
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}/`
+  }
+  return undefined
+}
+
 /**
  * @param {string} userId
  * @returns {Promise<{ data: object, updated_at: string } | null>}
@@ -38,9 +50,13 @@ export async function sendEmailOtp(email) {
   if (!supabase) throw new Error('Supabase is not configured')
   const cleanEmail = String(email || '').trim().toLowerCase()
   if (!cleanEmail) throw new Error('Enter an email address')
+  const emailRedirectTo = getEmailRedirectTo()
   const { error } = await supabase.auth.signInWithOtp({
     email: cleanEmail,
-    options: { shouldCreateUser: true },
+    options: {
+      shouldCreateUser: true,
+      ...(emailRedirectTo ? { emailRedirectTo } : {}),
+    },
   })
   if (error) throw error
 }
