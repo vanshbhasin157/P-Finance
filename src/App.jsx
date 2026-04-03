@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import {
   fetchFinanceData,
@@ -44,6 +44,10 @@ const initialState = {
   stocks: [],
   fds: [],
   rds: [],
+  goals: {
+    emergencyFundTarget: '',
+    emergencyFundSaved: '',
+  },
 }
 
 function migrateLoadedState(raw) {
@@ -53,6 +57,10 @@ function migrateLoadedState(raw) {
   base.settings = { ...initialState.settings, ...(s.settings || {}) }
   base.backups = Array.isArray(s.backups) ? s.backups : []
   base.categoryBudgets = s.categoryBudgets && typeof s.categoryBudgets === 'object' ? s.categoryBudgets : {}
+  base.goals = {
+    ...initialState.goals,
+    ...(s.goals && typeof s.goals === 'object' ? s.goals : {}),
+  }
   if (Array.isArray(base.rds)) {
     base.rds = base.rds.map(recomputeStoredRd)
   }
@@ -110,6 +118,46 @@ function addMonths(isoDate, monthsToAdd) {
   if (Number.isNaN(date.getTime())) return ''
   date.setMonth(date.getMonth() + Math.max(0, toNumber(monthsToAdd)))
   return date.toISOString().slice(0, 10)
+}
+
+function todayIsoLocal() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function formatIsoDateReadable(iso) {
+  if (!iso) return '—'
+  const d = new Date(`${iso}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function formatTodayHeading(iso) {
+  const d = new Date(`${iso}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })
+}
+
+function loanPayoffIsoDate(loan) {
+  if (!loan?.startDate) return ''
+  const n = Math.max(0, Math.floor(toNumber(loan.tenureMonths)))
+  if (!n) return ''
+  return addMonths(loan.startDate, n)
+}
+
+function loanPrincipalPaidRatio(loan) {
+  const principal = Math.max(0, toNumber(loan.principal))
+  if (!principal) return 0
+  const outstanding = calculateLoanOutstanding(
+    loan.principal,
+    loan.rate,
+    loan.tenureMonths,
+    loan.paymentsMade,
+  )
+  return Math.min(1, Math.max(0, (principal - outstanding) / principal))
 }
 
 function calculateFDMaturityValue(principal, annualRatePercent, tenureMonths) {
@@ -400,8 +448,13 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
     setPage(1)
   }
 
+  const modalPanelRef = useRef(null)
+  const dialogLaunchFocusRef = useRef(null)
+
   useEffect(() => {
     if (!dialogOpen) return
+    dialogLaunchFocusRef.current = document.activeElement
+
     function onKeyDown(event) {
       if (event.key === 'Escape') {
         setEditingIndex(null)
@@ -412,9 +465,46 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
     document.addEventListener('keydown', onKeyDown)
     const prevOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
+
+    const panel = modalPanelRef.current
+    const focusables = panel
+      ? [
+          ...panel.querySelectorAll(
+            'button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])',
+          ),
+        ].filter((el) => !el.disabled)
+      : []
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    const t = window.setTimeout(() => first?.focus(), 0)
+
+    function onTrapKey(event) {
+      if (event.key !== 'Tab' || focusables.length === 0) return
+      if (event.shiftKey) {
+        if (document.activeElement === first) {
+          event.preventDefault()
+          last?.focus()
+        }
+      } else if (document.activeElement === last) {
+        event.preventDefault()
+        first?.focus()
+      }
+    }
+    panel?.addEventListener('keydown', onTrapKey)
+
     return () => {
+      window.clearTimeout(t)
       document.removeEventListener('keydown', onKeyDown)
       document.body.style.overflow = prevOverflow
+      panel?.removeEventListener('keydown', onTrapKey)
+      const toRestore = dialogLaunchFocusRef.current
+      if (toRestore && typeof toRestore.focus === 'function') {
+        try {
+          toRestore.focus()
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }, [dialogOpen, fields])
 
@@ -467,6 +557,40 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
             Clear filters
           </button>
         )}
+      </div>
+
+      <div className="list-card-stack" aria-label={`${title} entries`}>
+        {items.length === 0 && (
+          <div className="list-card-mobile-empty">
+            No entries yet. Use <strong>Add new</strong> to create one.
+          </div>
+        )}
+        {items.length > 0 && totalFiltered === 0 && (
+          <div className="list-card-mobile-empty">
+            No matching entries. Clear search or date filters.
+          </div>
+        )}
+        {pagedItems.map(({ item, originalIndex }) => (
+          <div key={`card-${originalIndex}`} className="list-card-row">
+            <div className="list-card-row-head">
+              <strong className="list-card-row-title">{item.name || 'Untitled'}</strong>
+              <span className="list-card-row-amount">
+                <Currency value={parseAmount(item.amount)} />
+              </span>
+            </div>
+            <p className="list-card-row-meta">{listItemDetailsCell(item)}</p>
+            <div className="list-card-row-actions">
+              {onUpdate && (
+                <button type="button" onClick={() => beginEdit(originalIndex)}>
+                  Edit
+                </button>
+              )}
+              <button type="button" onClick={() => onDelete(originalIndex)}>
+                Remove
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
 
       <div className="list-table-wrap">
@@ -571,10 +695,12 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
       {dialogOpen && (
         <div className="modal-backdrop" role="presentation" onClick={closeDialog}>
           <div
+            ref={modalPanelRef}
             className="modal-panel"
             role="dialog"
             aria-modal="true"
             aria-labelledby={dialogTitleId}
+            tabIndex={-1}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="modal-head">
@@ -1302,9 +1428,201 @@ function OnboardingPage({ onDone }) {
   )
 }
 
-function DashboardPage({ totals, charts, budgetInsights, trendView, onTrendViewChange }) {
+function GoalProgressBar({ ratio, label }) {
+  const pct = Math.round(Math.min(100, Math.max(0, ratio * 100)))
+  return (
+    <div
+      className="goal-progress"
+      role="progressbar"
+      aria-valuenow={pct}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label={label}
+    >
+      <div className="goal-progress-fill" style={{ width: `${pct}%` }} />
+    </div>
+  )
+}
+
+function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcuts }) {
+  const [category, setCategory] = useState('')
+  const [amount, setAmount] = useState('')
+  const [note, setNote] = useState('')
+
+  function handleSubmit(event) {
+    event.preventDefault()
+    const cleaned = category.trim()
+    if (!cleaned || parseAmount(amount) <= 0) return
+    onQuickSpend({
+      name: cleaned,
+      amount,
+      date: todayIso,
+      tag: '',
+      attachment: '',
+      note: note.trim(),
+    })
+    setAmount('')
+    setNote('')
+  }
+
+  return (
+    <div className="cards-grid one-col home-quick">
+      <div className="card home-hero">
+        <h2>Today</h2>
+        <p className="home-today-total">
+          <Currency value={todayTotal} />
+        </p>
+        <p className="helper home-today-label">{formatTodayHeading(todayIso)}</p>
+        <p className="helper">Total spends logged for this calendar date.</p>
+      </div>
+
+      <div className="card">
+        <h3>Quick add spend</h3>
+        <form className="home-quick-form" onSubmit={handleSubmit}>
+          <label className="sr-only" htmlFor="home-quick-category">
+            Category
+          </label>
+          <select
+            id="home-quick-category"
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+            required
+          >
+            <option value="">Select category</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <label className="sr-only" htmlFor="home-quick-amount">
+            Amount
+          </label>
+          <input
+            id="home-quick-amount"
+            type="number"
+            min="0"
+            step="any"
+            inputMode="decimal"
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+            placeholder="Amount"
+            required
+          />
+          <label className="sr-only" htmlFor="home-quick-note">
+            Note (optional)
+          </label>
+          <input
+            id="home-quick-note"
+            type="text"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Note (optional)"
+          />
+          <button type="submit" className="add-btn home-quick-submit">
+            Add to today
+          </button>
+        </form>
+      </div>
+
+      <div className="card">
+        <h3>Shortcuts</h3>
+        <div className="home-shortcuts">
+          {shortcuts.map((s) => (
+            <NavLink key={s.to} to={s.to} className="home-shortcut-link">
+              <span className="home-shortcut-icon" aria-hidden>
+                {s.icon}
+              </span>
+              <span>{s.label}</span>
+            </NavLink>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DashboardPage({
+  totals,
+  charts,
+  budgetInsights,
+  trendView,
+  onTrendViewChange,
+  goals,
+  loans,
+  onGoalFieldChange,
+}) {
+  const emergencyTarget = parseAmount(goals?.emergencyFundTarget)
+  const emergencySaved = parseAmount(goals?.emergencyFundSaved)
+  const emergencyRatio = emergencyTarget > 0 ? Math.min(1, emergencySaved / emergencyTarget) : 0
+
   return (
     <>
+      <section className="cards-grid two-col goals-section">
+        <div className="card">
+          <h3>Emergency fund</h3>
+          <p className="helper">Target vs amount you have set aside (manual entry).</p>
+          <div className="goal-inputs">
+            <label>
+              <span>Target</span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                inputMode="decimal"
+                value={goals?.emergencyFundTarget ?? ''}
+                onChange={(event) => onGoalFieldChange('emergencyFundTarget', event.target.value)}
+                placeholder="e.g. 500000"
+              />
+            </label>
+            <label>
+              <span>Saved so far</span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                inputMode="decimal"
+                value={goals?.emergencyFundSaved ?? ''}
+                onChange={(event) => onGoalFieldChange('emergencyFundSaved', event.target.value)}
+                placeholder="e.g. 120000"
+              />
+            </label>
+          </div>
+          <GoalProgressBar
+            ratio={emergencyRatio}
+            label="Emergency fund progress toward target"
+          />
+          <p className="goal-progress-caption">
+            {emergencyTarget > 0
+              ? `${moneyFormatter.format(emergencySaved)} of ${moneyFormatter.format(emergencyTarget)}`
+              : 'Set a target to see progress.'}
+          </p>
+        </div>
+
+        <div className="card">
+          <h3>Loan payoff</h3>
+          <p className="helper">Estimated last payment date from start + tenure. Progress from principal paid down.</p>
+          {loans.length === 0 && <p className="helper">No loans yet — add them under Liabilities → Loans.</p>}
+          <ul className="loan-goal-list">
+            {loans.map((loan, i) => {
+              const payoff = loanPayoffIsoDate(loan)
+              const paidRatio = loanPrincipalPaidRatio(loan)
+              return (
+                <li key={`loan-goal-${loan.name || i}-${i}`}>
+                  <div className="loan-goal-head">
+                    <strong>{loan.name || 'Loan'}</strong>
+                    <span className="loan-goal-date">
+                      Payoff {payoff ? formatIsoDateReadable(payoff) : '— (add start date & tenure)'}
+                    </span>
+                  </div>
+                  <GoalProgressBar ratio={paidRatio} label={`${loan.name || 'Loan'} principal paid`} />
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      </section>
+
       <section className="stats-grid">
         <article className="stat">
           <h4>Total Monthly Income</h4>
@@ -1557,6 +1875,13 @@ function App() {
 
   function updateField(key, value) {
     setState((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateGoals(patch) {
+    setState((prev) => ({
+      ...prev,
+      goals: { ...initialState.goals, ...(prev.goals || {}), ...patch },
+    }))
   }
 
   function normalizeItem(key, item) {
@@ -1932,11 +2257,29 @@ function App() {
       .sort((a, b) => a.delta - b.delta)
   }, [state.categoryBudgets, state.dailySpends])
 
+  const todayStr = todayIsoLocal()
+  const todaySpendsTotal = useMemo(
+    () =>
+      state.dailySpends
+        .filter((s) => s.date === todayStr)
+        .reduce((sum, s) => sum + parseAmount(s.amount), 0),
+    [state.dailySpends, todayStr],
+  )
+
+  const homeShortcuts = [
+    { to: '/dashboard', label: 'Dashboard', icon: '▣' },
+    { to: '/daily-spends', label: 'All spends', icon: '≡' },
+    { to: '/budgets', label: 'Budgets', icon: '⊕' },
+    { to: '/loans', label: 'Loans', icon: '⌁' },
+    { to: '/investments', label: 'Investments', icon: '◇' },
+  ]
+
   const navGroups = [
     {
       title: 'Overview',
       sectionIcon: '◉',
       items: [
+        { to: '/home', label: 'Home', shortLabel: 'H', icon: '⌂' },
         { to: '/dashboard', label: 'Dashboard', shortLabel: 'DB', icon: '▣' },
         { to: '/onboarding', label: 'Start', shortLabel: '★', icon: '✦' },
       ],
@@ -1980,6 +2323,7 @@ function App() {
     },
   ]
   const mobileTabs = [
+    { to: '/home', label: 'Home', icon: '⌂' },
     { to: '/dashboard', label: 'Dashboard', icon: '▣' },
     { to: '/daily-spends', label: 'Spends', icon: '≡' },
     { to: '/investments', label: 'Invest', icon: '◇' },
@@ -2229,7 +2573,19 @@ function App() {
 
         <section className="page">
           <Routes>
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/" element={<Navigate to="/home" replace />} />
+          <Route
+            path="/home"
+            element={
+              <HomeQuickPage
+                todayTotal={todaySpendsTotal}
+                todayIso={todayStr}
+                categories={state.spendCategories}
+                onQuickSpend={(item) => addItem('dailySpends', item)}
+                shortcuts={homeShortcuts}
+              />
+            }
+          />
           <Route
             path="/dashboard"
             element={
@@ -2239,6 +2595,9 @@ function App() {
                 budgetInsights={budgetInsights}
                 trendView={trendView}
                 onTrendViewChange={setTrendView}
+                goals={state.goals}
+                loans={state.loans}
+                onGoalFieldChange={(key, value) => updateGoals({ [key]: value })}
               />
             }
           />
