@@ -2015,6 +2015,15 @@ function App() {
     }
   }
 
+  function formatAuthCloudError(err) {
+    const msg = String(err?.message || err || '')
+    const lower = msg.toLowerCase()
+    if (lower.includes('rate limit') || lower.includes('too many requests') || msg.includes('429')) {
+      return 'Supabase is temporarily limiting sign-in emails (rate limit). This can happen after testing from the same network. Wait 30–60 minutes, or in Supabase open Authentication → Rate Limits and raise OTP limits. For higher volume, add custom SMTP (see Supabase Auth rate limits docs).'
+    }
+    return msg || 'Request failed'
+  }
+
   async function handleSendEmailOtp(email) {
     if (!supabase) return false
     setSendingOtp(true)
@@ -2028,7 +2037,7 @@ function App() {
       ])
       return true
     } catch (e) {
-      setCloudError(e?.message || 'Could not send OTP')
+      setCloudError(formatAuthCloudError(e))
       return false
     } finally {
       setSendingOtp(false)
@@ -2048,7 +2057,7 @@ function App() {
       ])
       return true
     } catch (e) {
-      setCloudError(e?.message || 'Could not verify OTP')
+      setCloudError(formatAuthCloudError(e))
       return false
     } finally {
       setVerifyingOtp(false)
