@@ -8,6 +8,7 @@ import {
   signOut,
   upsertFinanceData,
   verifyEmailOtp,
+  withTimeout,
 } from './lib/financeRemote'
 import { consumeAuthHashFromUrl, supabase } from './lib/supabaseClient'
 import './App.css'
@@ -2166,8 +2167,19 @@ function App() {
 
     let uid = authUserIdRef.current
     if (!uid) {
-      const { data: { session } } = await supabase.auth.getSession()
-      uid = session?.user?.id ?? null
+      try {
+        const { data: { session } } = await withTimeout(
+          supabase.auth.getSession(),
+          15_000,
+          'Sign-in check',
+        )
+        uid = session?.user?.id ?? null
+      } catch (e) {
+        const msg = e?.message || 'Could not verify sign-in'
+        setCloudSync('error')
+        setCloudError(msg)
+        throw new Error(msg)
+      }
     }
     if (!uid) return
 

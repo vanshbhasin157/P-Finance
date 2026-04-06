@@ -2,6 +2,31 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 
 export { isSupabaseConfigured }
 
+/** Reject if `promise` does not settle in time (mobile networks often stall without failing). */
+export function withTimeout(promise, ms, label = 'Request') {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => {
+      reject(
+        new Error(
+          `${label} timed out after ${Math.round(ms / 1000)}s. Check your connection and try again.`,
+        ),
+      )
+    }, ms)
+    promise.then(
+      (value) => {
+        clearTimeout(id)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(id)
+        reject(err)
+      },
+    )
+  })
+}
+
+const UPSERT_TIMEOUT_MS = 45_000
+
 /** Where email magic links should send the user (must be listed in Supabase Auth → URL Configuration). */
 function getEmailRedirectTo() {
   const fromEnv = import.meta.env.VITE_SUPABASE_REDIRECT_URL
@@ -35,13 +60,17 @@ export async function fetchFinanceData(userId) {
  */
 export async function upsertFinanceData(userId, payload) {
   if (!supabase) return
-  const { error } = await supabase.from('user_finance_data').upsert(
-    {
-      user_id: userId,
-      data: payload,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'user_id' },
+  const { error } = await withTimeout(
+    supabase.from('user_finance_data').upsert(
+      {
+        user_id: userId,
+        data: payload,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id' },
+    ),
+    UPSERT_TIMEOUT_MS,
+    'Cloud save',
   )
   if (error) throw error
 }
