@@ -6,11 +6,7 @@ export { isSupabaseConfigured }
 export function withTimeout(promise, ms, label = 'Request') {
   return new Promise((resolve, reject) => {
     const id = setTimeout(() => {
-      reject(
-        new Error(
-          `${label} timed out after ${Math.round(ms / 1000)}s. Check your connection and try again.`,
-        ),
-      )
+      reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s. Check your connection and try again.`))
     }, ms)
     promise.then(
       (value) => {
@@ -45,11 +41,7 @@ function getEmailRedirectTo() {
  */
 export async function fetchFinanceData(userId) {
   if (!supabase) return null
-  const { data, error } = await supabase
-    .from('user_finance_data')
-    .select('data, updated_at')
-    .eq('user_id', userId)
-    .maybeSingle()
+  const { data, error } = await supabase.from('user_finance_data').select('data, updated_at').eq('user_id', userId).maybeSingle()
   if (error) throw error
   return data
 }
@@ -77,7 +69,9 @@ export async function upsertFinanceData(userId, payload) {
 
 export async function sendEmailOtp(email) {
   if (!supabase) throw new Error('Supabase is not configured')
-  const cleanEmail = String(email || '').trim().toLowerCase()
+  const cleanEmail = String(email || '')
+    .trim()
+    .toLowerCase()
   if (!cleanEmail) throw new Error('Enter an email address')
   const emailRedirectTo = getEmailRedirectTo()
   const { error } = await supabase.auth.signInWithOtp({
@@ -92,7 +86,9 @@ export async function sendEmailOtp(email) {
 
 export async function verifyEmailOtp(email, token) {
   if (!supabase) throw new Error('Supabase is not configured')
-  const cleanEmail = String(email || '').trim().toLowerCase()
+  const cleanEmail = String(email || '')
+    .trim()
+    .toLowerCase()
   const cleanToken = String(token || '').trim()
   if (!cleanEmail) throw new Error('Enter an email address')
   if (!cleanToken) throw new Error('Enter the OTP code')

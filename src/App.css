@@ -391,6 +391,43 @@ header p {
   flex-shrink: 0;
 }
 
+.list-card-row-amount--stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.list-card-row-amount--stack .holding-return-pct {
+  font-weight: 600;
+}
+
+.list-table-amount-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.holding-return-pct {
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.holding-return-up {
+  color: #16a34a;
+}
+
+.holding-return-down {
+  color: #dc2626;
+}
+
+.holding-return-flat {
+  opacity: 0.7;
+}
+
 .list-card-row-meta {
   margin: 8px 0 0;
   font-size: 0.82rem;

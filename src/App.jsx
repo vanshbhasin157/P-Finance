@@ -1,15 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import {
-  fetchFinanceData,
-  isSupabaseConfigured,
-  sendEmailOtp,
-  signOut,
-  upsertFinanceData,
-  verifyEmailOtp,
-  withTimeout,
-} from './lib/financeRemote'
+import { fetchFinanceData, isSupabaseConfigured, sendEmailOtp, signOut, upsertFinanceData, verifyEmailOtp, withTimeout } from './lib/financeRemote'
 import { consumeAuthHashFromUrl, supabase } from './lib/supabaseClient'
 import './App.css'
 
@@ -97,12 +89,7 @@ function calculateLoanEmi(principal, annualRatePercent, tenureMonths) {
   return (p * monthlyRate * factor) / (factor - 1)
 }
 
-function calculateLoanOutstanding(
-  principal,
-  annualRatePercent,
-  tenureMonths,
-  paymentsMade,
-) {
+function calculateLoanOutstanding(principal, annualRatePercent, tenureMonths, paymentsMade) {
   const p = Math.max(0, toNumber(principal))
   const months = Math.max(0, toNumber(tenureMonths))
   const paid = Math.max(0, toNumber(paymentsMade))
@@ -153,12 +140,7 @@ function loanPayoffIsoDate(loan) {
 function loanPrincipalPaidRatio(loan) {
   const principal = Math.max(0, toNumber(loan.principal))
   if (!principal) return 0
-  const outstanding = calculateLoanOutstanding(
-    loan.principal,
-    loan.rate,
-    loan.tenureMonths,
-    loan.paymentsMade,
-  )
+  const outstanding = calculateLoanOutstanding(loan.principal, loan.rate, loan.tenureMonths, loan.paymentsMade)
   return Math.min(1, Math.max(0, (principal - outstanding) / principal))
 }
 
@@ -186,7 +168,7 @@ function calculateRDMaturityValue(monthlyInstallment, annualRatePercent, tenureM
   const r = Math.max(0, toNumber(annualRatePercent)) / 400
   if (!p || !n) return 0
   if (!r) return p * n
-  return p * (((1 + r) ** n - 1) / (1 - (1 + r) ** (-1)))
+  return p * (((1 + r) ** n - 1) / (1 - (1 + r) ** -1))
 }
 
 /** Count of monthly installments credited as of asOfIso (same calendar day rule as typical RD). */
@@ -196,20 +178,13 @@ function completedRdInstallmentMonths(startDate, asOfIso) {
   const asOf = new Date(`${asOfIso}T12:00:00`)
   if (Number.isNaN(start.getTime()) || Number.isNaN(asOf.getTime())) return 0
   if (asOf < start) return 0
-  let months =
-    (asOf.getFullYear() - start.getFullYear()) * 12 + (asOf.getMonth() - start.getMonth())
+  let months = (asOf.getFullYear() - start.getFullYear()) * 12 + (asOf.getMonth() - start.getMonth())
   if (asOf.getDate() >= start.getDate()) months += 1
   return Math.max(0, months)
 }
 
 /** Accrued RD value today: same formula as maturity but only for installments paid so far. */
-function calculateRDCurrentValue(
-  monthlyInstallment,
-  annualRatePercent,
-  tenureMonths,
-  startDate,
-  maturityDateIso,
-) {
+function calculateRDCurrentValue(monthlyInstallment, annualRatePercent, tenureMonths, startDate, maturityDateIso) {
   const nFull = Math.max(0, Math.floor(toNumber(tenureMonths)))
   const maturityVal = calculateRDMaturityValue(monthlyInstallment, annualRatePercent, nFull)
   if (!nFull) return 0
@@ -225,18 +200,8 @@ function calculateRDCurrentValue(
 function recomputeStoredRd(item) {
   const row = typeof item === 'object' && item !== null ? item : {}
   const maturityDate = addMonths(row.startDate, row.tenureMonths)
-  const maturityValue = calculateRDMaturityValue(
-    row.monthlyInstallment,
-    row.rate,
-    row.tenureMonths,
-  )
-  const currentValue = calculateRDCurrentValue(
-    row.monthlyInstallment,
-    row.rate,
-    row.tenureMonths,
-    row.startDate,
-    maturityDate,
-  )
+  const maturityValue = calculateRDMaturityValue(row.monthlyInstallment, row.rate, row.tenureMonths)
+  const currentValue = calculateRDCurrentValue(row.monthlyInstallment, row.rate, row.tenureMonths, row.startDate, maturityDate)
   return {
     ...row,
     assetClass: row.assetClass || 'Debt',
@@ -262,7 +227,10 @@ function yearsBetween(isoStart, isoEnd = new Date().toISOString().slice(0, 10)) 
 
 function calculateCagr(invested, currentValue, years) {
   if (invested <= 0 || years <= 0 || currentValue <= 0) return null
-  return (currentValue / invested) ** (1 / years) - 1
+  // Below ~3 months, exponent 1/years explodes for normal returns → Infinity → .toFixed throws.
+  if (years < 0.25) return null
+  const raw = (currentValue / invested) ** (1 / years) - 1
+  return Number.isFinite(raw) ? raw : null
 }
 
 /** Simulate months to clear balance and total interest from current outstanding. */
@@ -298,10 +266,7 @@ function sumAllocationByClass(state, fdValuePerItem) {
   state.mutualFunds.forEach((i) => add(i, parseAmount(i.amount)))
   state.assets.forEach((i) => add(i, parseAmount(i.amount)))
   state.fds.forEach((i) => {
-    const v =
-      typeof fdValuePerItem === 'function'
-        ? fdValuePerItem(i)
-        : parseAmount(i.principal ?? i.amount)
+    const v = typeof fdValuePerItem === 'function' ? fdValuePerItem(i) : parseAmount(i.principal ?? i.amount)
     add({ assetClass: i.assetClass || 'Debt' }, v)
   })
   state.rds.forEach((i) => add({ assetClass: i.assetClass || 'Debt' }, parseAmount(i.amount)))
@@ -325,6 +290,36 @@ function Currency({ value }) {
   return <span>{moneyFormatter.format(value)}</span>
 }
 
+/** Unrealized gain/loss as % of invested; null if cost basis is zero or missing. */
+function holdingUnrealizedReturnPct(item) {
+  const inv = parseAmount(item?.invested)
+  if (inv <= 0) return null
+  // gainLoss can be negative; parseAmount() would clamp it to 0 and hide losses.
+  const gl = toNumber(item?.gainLoss)
+  return (gl / inv) * 100
+}
+
+function HoldingReturnPct({ item }) {
+  const pct = holdingUnrealizedReturnPct(item)
+  if (pct === null) return null
+  const abs = Math.abs(pct)
+  const decimals = abs >= 100 ? 1 : 2
+  const formatted = pct.toFixed(decimals)
+  const sign = pct > 0 ? '+' : ''
+  const cls =
+    pct > 0
+      ? 'holding-return-pct holding-return-up'
+      : pct < 0
+        ? 'holding-return-pct holding-return-down'
+        : 'holding-return-pct holding-return-flat'
+  return (
+    <span className={cls} title="Unrealized return vs invested amount">
+      {sign}
+      {formatted}%
+    </span>
+  )
+}
+
 function SingleFieldCard({ label, value, onBlurPersist, placeholder, helper }) {
   const [draft, setDraft] = useState(value)
   const [syncing, setSyncing] = useState(false)
@@ -346,14 +341,7 @@ function SingleFieldCard({ label, value, onBlurPersist, placeholder, helper }) {
     <div className="card">
       <h3>{label}</h3>
       {helper && <p className="helper">{helper}</p>}
-      <input
-        type="number"
-        min="0"
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={handleBlur}
-        placeholder={placeholder}
-      />
+      <input type="number" min="0" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={handleBlur} placeholder={placeholder} />
       {syncing && <p className="helper field-sync-hint">Syncing to cloud…</p>}
     </div>
   )
@@ -391,14 +379,35 @@ function listItemDetailsCell(item) {
   return line || '—'
 }
 
+/** Stored note = auto summary + this marker + user folio/notes only (mutual funds / stocks). */
+const HOLDING_USER_NOTE_MARKER = '\n--- notes ---\n'
+
+/** Strip repeated auto-generated "Invested | Unrealized…" prefixes; return only user-written notes. */
+function extractUserNoteFromHoldingStoredNote(stored) {
+  if (stored == null) return ''
+  const s = String(stored)
+  const idx = s.indexOf(HOLDING_USER_NOTE_MARKER)
+  if (idx !== -1) {
+    return s.slice(idx + HOLDING_USER_NOTE_MARKER.length).trim()
+  }
+  let rest = s.trim()
+  const autoBlock =
+    /^(?:\|\s*)?Invested\s[^|]+\|\s*Unrealized\s[^|]+(?:\s*\|\s*CAGR\s[^|]+)?(?:\s*\|\s*Realized P\/L\s[^|]+)?/
+  for (let guard = 0; guard < 30 && rest.length > 0; guard++) {
+    const m = rest.match(autoBlock)
+    if (!m) break
+    rest = rest.slice(m[0].length).replace(/^\s*\|\s*/, '').trim()
+  }
+  return rest
+}
+
 /** Newest first: explicit createdAt, else calendar date fields, else array order (higher index = newer). */
 function listItemSortTimeMs(item) {
   if (item.createdAt) {
     const t = Date.parse(String(item.createdAt))
     if (!Number.isNaN(t)) return t
   }
-  const iso =
-    item.date || item.purchaseDate || item.startDate || item.maturityDate || ''
+  const iso = item.date || item.purchaseDate || item.startDate || item.maturityDate || ''
   if (typeof iso === 'string' && iso.length >= 10) {
     const t = Date.parse(`${iso.slice(0, 10)}T12:00:00`)
     if (!Number.isNaN(t)) return t
@@ -406,10 +415,20 @@ function listItemSortTimeMs(item) {
   return 0
 }
 
-function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, helper, pageSize = 10 }) {
-  const [entry, setEntry] = useState(
-    Object.fromEntries(fields.map((field) => [field.key, ''])),
-  )
+function ListCard({
+  title,
+  items,
+  onAdd,
+  onDelete,
+  onUpdate,
+  fields,
+  total,
+  helper,
+  pageSize = 10,
+  sanitizeEntryForEdit,
+  showHoldingReturnPct = false,
+}) {
+  const [entry, setEntry] = useState(Object.fromEntries(fields.map((field) => [field.key, ''])))
   const [query, setQuery] = useState('')
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
@@ -460,7 +479,24 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
 
   function beginEdit(originalIndex) {
     setEditingIndex(originalIndex)
-    setEntry({ ...items[originalIndex] })
+    let raw = items[originalIndex] || {}
+    if (typeof sanitizeEntryForEdit === 'function') {
+      raw = sanitizeEntryForEdit(raw) || raw
+    }
+    const next = { ...raw }
+    for (const f of fields) {
+      const v = raw[f.key]
+      if (f.type === 'number') {
+        next[f.key] = v === undefined || v === null || v === '' ? '' : String(v)
+      } else if (f.type === 'select') {
+        next[f.key] = v === undefined || v === null ? '' : String(v)
+      } else if (f.type === 'file') {
+        next[f.key] = v == null ? '' : String(v)
+      } else {
+        next[f.key] = v == null ? '' : String(v)
+      }
+    }
+    setEntry(next)
     setDialogOpen(true)
   }
 
@@ -475,8 +511,7 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
       const q = query.trim().toLowerCase()
       const haystack = collectSearchText(item).toLowerCase()
       const matchesQuery = !q || haystack.includes(q)
-      const itemDate =
-        item.date || item.purchaseDate || item.startDate || item.maturityDate || ''
+      const itemDate = item.date || item.purchaseDate || item.startDate || item.maturityDate || ''
       const matchesFromDate = !fromDate || !itemDate || itemDate >= fromDate
       const matchesToDate = !toDate || !itemDate || itemDate <= toDate
       return matchesQuery && matchesFromDate && matchesToDate
@@ -518,11 +553,9 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
 
     const panel = modalPanelRef.current
     const focusables = panel
-      ? [
-          ...panel.querySelectorAll(
-            'button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])',
-          ),
-        ].filter((el) => !el.disabled)
+      ? [...panel.querySelectorAll('button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])')].filter(
+          (el) => !el.disabled,
+        )
       : []
     const first = focusables[0]
     const last = focusables[focusables.length - 1]
@@ -568,12 +601,7 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
           <p className="card-total">
             Total: <Currency value={total} />
           </p>
-          <button
-            type="button"
-            className="btn-add-new"
-            onClick={openAddDialog}
-            disabled={submitSyncing || deletingIndex !== null}
-          >
+          <button type="button" className="btn-add-new" onClick={openAddDialog} disabled={submitSyncing || deletingIndex !== null}>
             Add new
           </button>
         </div>
@@ -620,27 +648,22 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
             No entries yet. Use <strong>Add new</strong> to create one.
           </div>
         )}
-        {items.length > 0 && totalFiltered === 0 && (
-          <div className="list-card-mobile-empty">
-            No matching entries. Clear search or date filters.
-          </div>
-        )}
+        {items.length > 0 && totalFiltered === 0 && <div className="list-card-mobile-empty">No matching entries. Clear search or date filters.</div>}
         {pagedItems.map(({ item, originalIndex }) => (
           <div key={`card-${originalIndex}`} className="list-card-row">
             <div className="list-card-row-head">
               <strong className="list-card-row-title">{item.name || 'Untitled'}</strong>
-              <span className="list-card-row-amount">
+              <span
+                className={`list-card-row-amount${showHoldingReturnPct ? ' list-card-row-amount--stack' : ''}`}
+              >
                 <Currency value={parseAmount(item.amount)} />
+                {showHoldingReturnPct && <HoldingReturnPct item={item} />}
               </span>
             </div>
             <p className="list-card-row-meta">{listItemDetailsCell(item)}</p>
             <div className="list-card-row-actions">
               {onUpdate && (
-                <button
-                  type="button"
-                  disabled={deletingIndex !== null}
-                  onClick={() => beginEdit(originalIndex)}
-                >
+                <button type="button" disabled={deletingIndex !== null} onClick={() => beginEdit(originalIndex)}>
                   Edit
                 </button>
               )}
@@ -707,16 +730,19 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
                   <span className="list-table-meta">{listItemDetailsCell(item)}</span>
                 </td>
                 <td className="list-table-amount">
-                  <Currency value={parseAmount(item.amount)} />
+                  {showHoldingReturnPct ? (
+                    <div className="list-table-amount-stack">
+                      <Currency value={parseAmount(item.amount)} />
+                      <HoldingReturnPct item={item} />
+                    </div>
+                  ) : (
+                    <Currency value={parseAmount(item.amount)} />
+                  )}
                 </td>
                 <td className="list-table-actions">
                   <div className="table-row-actions">
                     {onUpdate && (
-                      <button
-                        type="button"
-                        disabled={deletingIndex !== null}
-                        onClick={() => beginEdit(originalIndex)}
-                      >
+                      <button type="button" disabled={deletingIndex !== null} onClick={() => beginEdit(originalIndex)}>
                         Edit
                       </button>
                     )}
@@ -806,13 +832,7 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
               <h3 id={dialogTitleId}>
                 {editingIndex !== null ? 'Edit entry' : 'Add new'} — {title}
               </h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={closeDialog}
-                disabled={submitSyncing}
-                aria-label="Close"
-              >
+              <button type="button" className="modal-close" onClick={closeDialog} disabled={submitSyncing} aria-label="Close">
                 ×
               </button>
             </div>
@@ -826,11 +846,7 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
                       <label className="modal-field-label-text" htmlFor={fieldId}>
                         {label}
                       </label>
-                      <select
-                        id={fieldId}
-                        value={entry[field.key] ?? ''}
-                        onChange={(event) => updateEntry(field.key, event.target.value)}
-                      >
+                      <select id={fieldId} value={entry[field.key] ?? ''} onChange={(event) => updateEntry(field.key, event.target.value)}>
                         <option value="">Choose…</option>
                         {field.options?.map((option) => (
                           <option key={option} value={option}>
@@ -848,17 +864,12 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
                         id={fieldId}
                         type={field.type ?? 'text'}
                         min={field.type === 'number' ? '0' : undefined}
+                        step={field.type === 'number' ? 'any' : undefined}
+                        inputMode={field.type === 'number' ? 'decimal' : undefined}
                         placeholder={field.placeholder}
                         autoComplete="off"
                         value={field.type === 'file' ? undefined : (entry[field.key] ?? '')}
-                        onChange={(event) =>
-                          updateEntry(
-                            field.key,
-                            field.type === 'file'
-                              ? event.target.files?.[0]?.name ?? ''
-                              : event.target.value,
-                          )
-                        }
+                        onChange={(event) => updateEntry(field.key, field.type === 'file' ? (event.target.files?.[0]?.name ?? '') : event.target.value)}
                       />
                     </div>
                   )
@@ -866,25 +877,11 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
               </div>
             </div>
             <div className="modal-footer">
-              <button
-                type="button"
-                className="ghost-btn modal-footer-btn"
-                onClick={closeDialog}
-                disabled={submitSyncing}
-              >
+              <button type="button" className="ghost-btn modal-footer-btn" onClick={closeDialog} disabled={submitSyncing}>
                 Cancel
               </button>
-              <button
-                type="button"
-                className="add-btn modal-footer-btn"
-                disabled={submitSyncing}
-                onClick={() => void handleSubmit()}
-              >
-                {submitSyncing
-                  ? 'Syncing to cloud…'
-                  : editingIndex !== null
-                    ? 'Save changes'
-                    : 'Add entry'}
+              <button type="button" className="add-btn modal-footer-btn" disabled={submitSyncing} onClick={() => void handleSubmit()}>
+                {submitSyncing ? 'Syncing to cloud…' : editingIndex !== null ? 'Save changes' : 'Add entry'}
               </button>
             </div>
           </div>
@@ -929,38 +926,21 @@ function SpendCategoriesPage({ categories, onAdd, onDelete }) {
         </div>
         <p className="helper">Manage values used in Daily Spends category dropdown.</p>
         <div className="inline-form">
-          <input
-            type="text"
-            value={newCategory}
-            onChange={(event) => setNewCategory(event.target.value)}
-            placeholder="e.g. Travel"
-            disabled={addSyncing}
-          />
-          <button
-            className="add-btn"
-            type="button"
-            onClick={handleAddCategory}
-            disabled={addSyncing}
-          >
+          <input type="text" value={newCategory} onChange={(event) => setNewCategory(event.target.value)} placeholder="e.g. Travel" disabled={addSyncing} />
+          <button className="add-btn" type="button" onClick={handleAddCategory} disabled={addSyncing}>
             {addSyncing ? 'Syncing to cloud…' : 'Add Category'}
           </button>
         </div>
 
         <ul className="item-list">
-          {categories.length === 0 && (
-            <li className="empty-row">No categories yet. Add one above.</li>
-          )}
+          {categories.length === 0 && <li className="empty-row">No categories yet. Add one above.</li>}
           {categories.map((category) => (
             <li key={category}>
               <div>
                 <strong>{category}</strong>
               </div>
               <div className="row-actions">
-                <button
-                  type="button"
-                  onClick={() => handleDelete(category)}
-                  disabled={deleting !== null}
-                >
+                <button type="button" onClick={() => handleDelete(category)} disabled={deleting !== null}>
                   {deleting === category ? 'Removing…' : 'Remove'}
                 </button>
               </div>
@@ -998,16 +978,7 @@ function MiniBarChart({ title, data }) {
   )
 }
 
-function DailySpendsPage({
-  items,
-  total,
-  categories,
-  onAddItem,
-  onUpdateItem,
-  onDeleteItem,
-  onAddCategory,
-  onDeleteCategory,
-}) {
+function DailySpendsPage({ items, total, categories, onAddItem, onUpdateItem, onDeleteItem, onAddCategory, onDeleteCategory }) {
   const [newCategory, setNewCategory] = useState('')
   const [addSyncing, setAddSyncing] = useState(false)
   const [deleting, setDeleting] = useState(null)
@@ -1070,12 +1041,7 @@ function DailySpendsPage({
             placeholder="e.g. Entertainment"
             disabled={addSyncing}
           />
-          <button
-            className="add-btn"
-            type="button"
-            onClick={handleAddCategory}
-            disabled={addSyncing}
-          >
+          <button className="add-btn" type="button" onClick={handleAddCategory} disabled={addSyncing}>
             {addSyncing ? 'Syncing to cloud…' : 'Add Category'}
           </button>
         </div>
@@ -1084,11 +1050,7 @@ function DailySpendsPage({
             <li key={category}>
               <strong>{category}</strong>
               <div className="row-actions">
-                <button
-                  type="button"
-                  onClick={() => handleDeleteCategory(category)}
-                  disabled={deleting !== null}
-                >
+                <button type="button" onClick={() => handleDeleteCategory(category)} disabled={deleting !== null}>
                   {deleting === category ? 'Removing…' : 'Remove'}
                 </button>
               </div>
@@ -1121,14 +1083,7 @@ function BudgetCategoryRow({ category, budgetValue, onCommit }) {
     <li>
       <strong>{category}</strong>
       <div className="row-actions budget-row-sync" style={{ flexWrap: 'wrap', gap: '0.35rem' }}>
-        <input
-          type="number"
-          min="0"
-          placeholder="Monthly budget"
-          value={local}
-          onChange={(event) => setLocal(event.target.value)}
-          onBlur={handleBlur}
-        />
+        <input type="number" min="0" placeholder="Monthly budget" value={local} onChange={(event) => setLocal(event.target.value)} onBlur={handleBlur} />
         {syncing && <span className="helper">Syncing to cloud…</span>}
       </div>
     </li>
@@ -1140,17 +1095,10 @@ function BudgetPage({ categories, budgets, onSaveBudget }) {
     <div className="cards-grid one-col">
       <div className="card">
         <h3>Monthly Category Budgets</h3>
-        <p className="helper">
-          Set monthly limits used for dashboard over/under alerts. Values save when you leave each field.
-        </p>
+        <p className="helper">Set monthly limits used for dashboard over/under alerts. Values save when you leave each field.</p>
         <ul className="item-list">
           {categories.map((category) => (
-            <BudgetCategoryRow
-              key={category}
-              category={category}
-              budgetValue={budgets[category]}
-              onCommit={onSaveBudget}
-            />
+            <BudgetCategoryRow key={category} category={category} budgetValue={budgets[category]} onCommit={onSaveBudget} />
           ))}
         </ul>
       </div>
@@ -1180,15 +1128,7 @@ function AllocationPie({ slices }) {
       const y2 = cy + r * Math.sin(end)
       const large = a > Math.PI ? 1 : 0
       const d = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`
-      const el = (
-        <path
-          key={slice.label}
-          d={d}
-          fill={colors[i % colors.length]}
-          stroke="var(--bg)"
-          strokeWidth="1"
-        />
-      )
+      const el = <path key={slice.label} d={d} fill={colors[i % colors.length]} stroke="var(--bg)" strokeWidth="1" />
       return { angle: end, paths: [...acc.paths, el] }
     },
     { angle: -Math.PI / 2, paths: [] },
@@ -1204,8 +1144,7 @@ function AllocationPie({ slices }) {
           .map((slice, i) => (
             <li key={slice.label}>
               <span className="swatch" style={{ background: colors[i % colors.length] }} />
-              {slice.label}{' '}
-              <strong>{((slice.value / total) * 100).toFixed(1)}%</strong>
+              {slice.label} <strong>{((slice.value / total) * 100).toFixed(1)}%</strong>
             </li>
           ))}
       </ul>
@@ -1220,12 +1159,8 @@ function LoanPlanningPage({ loans, creditCards, emis }) {
   const outstanding = selected ? parseAmount(selected.amount) : 0
   const rate = selected ? toNumber(selected.rate) : 0
   const emi = selected ? calculateLoanEmi(selected.principal, selected.rate, selected.tenureMonths) : 0
-  const baseline = selected
-    ? simulateLoanPayoff(outstanding, rate, emi, 0)
-    : { months: 0, interestTotal: 0, stuck: false }
-  const withExtra = selected
-    ? simulateLoanPayoff(outstanding, rate, emi, parseAmount(extra))
-    : { months: 0, interestTotal: 0, stuck: false }
+  const baseline = selected ? simulateLoanPayoff(outstanding, rate, emi, 0) : { months: 0, interestTotal: 0, stuck: false }
+  const withExtra = selected ? simulateLoanPayoff(outstanding, rate, emi, parseAmount(extra)) : { months: 0, interestTotal: 0, stuck: false }
 
   const cardDebts = creditCards
     .map((c) => ({
@@ -1276,31 +1211,20 @@ function LoanPlanningPage({ loans, creditCards, emis }) {
     <div className="cards-grid one-col wide">
       <div className="card">
         <h3>Prepayment simulator</h3>
-        <p className="helper">
-          Uses current outstanding and EMI from a saved loan. Extra payment is added each month.
-        </p>
+        <p className="helper">Uses current outstanding and EMI from a saved loan. Extra payment is added each month.</p>
         {loans.length === 0 ? (
           <p className="helper">Add loans on the Loans page first.</p>
         ) : (
           <>
             <div className="filters-row">
-              <select
-                value={loanIndex}
-                onChange={(e) => setLoanIndex(Number(e.target.value))}
-              >
+              <select value={loanIndex} onChange={(e) => setLoanIndex(Number(e.target.value))}>
                 {loans.map((l, i) => (
                   <option key={`loan-opt-${i}`} value={i}>
                     {l.name || `Loan ${i + 1}`}
                   </option>
                 ))}
               </select>
-              <input
-                type="number"
-                min="0"
-                placeholder="Extra ₹ / month"
-                value={extra}
-                onChange={(e) => setExtra(e.target.value)}
-              />
+              <input type="number" min="0" placeholder="Extra ₹ / month" value={extra} onChange={(e) => setExtra(e.target.value)} />
             </div>
             <ul className="item-list plain">
               <li>
@@ -1314,9 +1238,7 @@ function LoanPlanningPage({ loans, creditCards, emis }) {
               <li>
                 <span>Interest saved (approx.)</span>
                 <strong>
-                  {!baseline.stuck && !withExtra.stuck
-                    ? moneyFormatter.format(Math.max(0, baseline.interestTotal - withExtra.interestTotal))
-                    : '—'}
+                  {!baseline.stuck && !withExtra.stuck ? moneyFormatter.format(Math.max(0, baseline.interestTotal - withExtra.interestTotal)) : '—'}
                 </strong>
               </li>
             </ul>
@@ -1351,13 +1273,9 @@ function LoanPlanningPage({ loans, creditCards, emis }) {
 
       <div className="card">
         <h3>Upcoming dues (next ~3 months)</h3>
-        <p className="helper">
-          Cards: set due day or put a date (yyyy-mm-dd) in notes. EMIs: set due day of month.
-        </p>
+        <p className="helper">Cards: set due day or put a date (yyyy-mm-dd) in notes. EMIs: set due day of month.</p>
         <ul className="item-list">
-          {upcoming.length === 0 && (
-            <li className="empty-row">No upcoming items. Add due days on Credit Cards / EMIs.</li>
-          )}
+          {upcoming.length === 0 && <li className="empty-row">No upcoming items. Add due days on Credit Cards / EMIs.</li>}
           {upcoming.map((e, i) => (
             <li key={e.label + i}>
               <div>
@@ -1399,15 +1317,7 @@ function AllocationTargetRow({ cls, act, tgt, targetStr, onCommit }) {
         </small>
       </div>
       <div className="row-actions budget-row-sync" style={{ flexWrap: 'wrap', gap: '0.35rem' }}>
-        <input
-          type="number"
-          min="0"
-          max="100"
-          className="target-input"
-          value={local}
-          onChange={(e) => setLocal(e.target.value)}
-          onBlur={handleBlur}
-        />
+        <input type="number" min="0" max="100" className="target-input" value={local} onChange={(e) => setLocal(e.target.value)} onBlur={handleBlur} />
         {syncing && <span className="helper">Syncing to cloud…</span>}
       </div>
     </li>
@@ -1431,33 +1341,21 @@ function InvestmentsPage({ state, fdValueFn, targets, onTargetChange }) {
     <div className="cards-grid one-col wide">
       <div className="card">
         <h3>Allocation by class</h3>
-        <p className="helper">
-          Tag MF, Stocks, Assets, FD, RD with asset class. FD/RD default to Debt.
-        </p>
+        <p className="helper">Tag MF, Stocks, Assets, FD, RD with asset class. FD/RD default to Debt.</p>
         <AllocationPie slices={slices} />
       </div>
       <div className="card">
         <h3>Target vs actual</h3>
-        <p className="helper">
-          Set target % per class. Values save when you leave each field. Rebalance hint is simplified (largest gap).
-        </p>
+        <p className="helper">Set target % per class. Values save when you leave each field. Rebalance hint is simplified (largest gap).</p>
         <ul className="item-list">
           {rows.map((row) => (
-            <AllocationTargetRow
-              key={row.cls}
-              cls={row.cls}
-              act={row.act}
-              tgt={row.tgt}
-              targetStr={targets[row.cls]}
-              onCommit={onTargetChange}
-            />
+            <AllocationTargetRow key={row.cls} cls={row.cls} act={row.act} tgt={row.tgt} targetStr={targets[row.cls]} onCommit={onTargetChange} />
           ))}
         </ul>
         {total > 0 && overweight && underweight && Math.abs(overweight.diff) > 1 && (
           <p className="rebalance-hint">
-            Hint: <strong>{overweight.cls}</strong> is ~{overweight.diff.toFixed(1)}% above target;
-            consider shifting toward <strong>{underweight.cls}</strong> (below target by ~
-            {Math.abs(underweight.diff).toFixed(1)}%).
+            Hint: <strong>{overweight.cls}</strong> is ~{overweight.diff.toFixed(1)}% above target; consider shifting toward <strong>{underweight.cls}</strong>{' '}
+            (below target by ~{Math.abs(underweight.diff).toFixed(1)}%).
           </p>
         )}
       </div>
@@ -1502,37 +1400,29 @@ function SettingsPage({
         <h3>Cloud sync (Supabase)</h3>
         {!supabaseConfigured && (
           <p className="helper">
-            Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> to{' '}
-            <code>.env.local</code>, then restart <code>npm run dev</code>. Run the SQL in{' '}
-            <code>supabase/migrations/001_user_finance_data.sql</code> in the Supabase SQL Editor.
+            Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> to <code>.env.local</code>, then restart <code>npm run dev</code>. Run
+            the SQL in <code>supabase/migrations/001_user_finance_data.sql</code> in the Supabase SQL Editor.
           </p>
         )}
         {supabaseConfigured && (
           <>
             <p className="helper">
-              Sign in with your email OTP to sync the same cloud data across phone and laptop.
-              Your <strong>app PIN</strong> below still only locks this device UI.
+              Sign in with your email OTP to sync the same cloud data across phone and laptop. Your <strong>app PIN</strong> below still only locks this device
+              UI.
             </p>
             <p className="helper">
-              The default Supabase email only shows a <strong>magic link</strong> until you edit the template:
-              Dashboard → <strong>Authentication → Email Templates</strong> → <strong>Magic link</strong>, and
-              add a line like <code>Your code: {'{{ .Token }}'}</code> (6-digit OTP). Same variable is
-              documented in{' '}
+              The default Supabase email only shows a <strong>magic link</strong> until you edit the template: Dashboard →{' '}
+              <strong>Authentication → Email Templates</strong> → <strong>Magic link</strong>, and add a line like <code>Your code: {'{{ .Token }}'}</code>{' '}
+              (6-digit OTP). Same variable is documented in{' '}
               <a href="https://supabase.com/docs/guides/auth/auth-email-templates" target="_blank" rel="noreferrer">
                 Email templates
               </a>
-              . Then use <strong>Verify OTP</strong> below with that code. Magic links still need{' '}
-              <strong>Authentication → URL Configuration</strong> (Site URL + Redirect URLs, or{' '}
-              <code>VITE_SUPABASE_REDIRECT_URL</code> in <code>.env.local</code>).
+              . Then use <strong>Verify OTP</strong> below with that code. Magic links still need <strong>Authentication → URL Configuration</strong> (Site URL
+              + Redirect URLs, or <code>VITE_SUPABASE_REDIRECT_URL</code> in <code>.env.local</code>).
             </p>
             <div>
               <div className="inline-form">
-                <input
-                  type="email"
-                  placeholder="name@example.com"
-                  value={emailInput}
-                  onChange={(e) => setEmailInput(e.target.value)}
-                />
+                <input type="email" placeholder="name@example.com" value={emailInput} onChange={(e) => setEmailInput(e.target.value)} />
                 <button
                   type="button"
                   className="add-btn"
@@ -1550,13 +1440,7 @@ function SettingsPage({
               </div>
               {(otpSentFor || !authUser) && (
                 <div className="inline-form">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="Enter OTP code"
-                    value={otpInput}
-                    onChange={(e) => setOtpInput(e.target.value)}
-                  />
+                  <input type="text" inputMode="numeric" placeholder="Enter OTP code" value={otpInput} onChange={(e) => setOtpInput(e.target.value)} />
                   <button
                     type="button"
                     className="add-btn"
@@ -1579,8 +1463,7 @@ function SettingsPage({
                     Cloud session: <strong>{authUser.email || 'Signed in'}</strong>
                   </p>
                   <p className="helper">
-                    Sync:{' '}
-                    {cloudSync === 'syncing' && 'Saving…'}
+                    Sync: {cloudSync === 'syncing' && 'Saving…'}
                     {cloudSync === 'saved' && 'Saved to cloud'}
                     {cloudSync === 'idle' && 'Ready'}
                     {cloudSync === 'error' && 'Save failed'}
@@ -1598,17 +1481,9 @@ function SettingsPage({
 
       <div className="card">
         <h3>App PIN</h3>
-        <p className="helper">
-          Locks this browser tab until unlocked (session). PIN is stored locally with your data.
-        </p>
+        <p className="helper">Locks this browser tab until unlocked (session). PIN is stored locally with your data.</p>
         <div className="inline-form">
-          <input
-            type="password"
-            placeholder="New PIN (4–8 digits)"
-            value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            disabled={pinBusy}
-          />
+          <input type="password" placeholder="New PIN (4–8 digits)" value={pinInput} onChange={(e) => setPinInput(e.target.value)} disabled={pinBusy} />
           <button
             type="button"
             className="add-btn"
@@ -1649,12 +1524,7 @@ function SettingsPage({
         <h3>Versioned backups</h3>
         <p className="helper">Keep restore points in browser storage (last 15).</p>
         <div className="inline-form">
-          <input
-            type="text"
-            placeholder="Label (optional)"
-            value={backupLabel}
-            onChange={(e) => setBackupLabel(e.target.value)}
-          />
+          <input type="text" placeholder="Label (optional)" value={backupLabel} onChange={(e) => setBackupLabel(e.target.value)} />
           <button
             type="button"
             className="add-btn"
@@ -1795,14 +1665,7 @@ function GoalFundField({ label, goalKey, value, onBlurPersist, placeholder }) {
 function GoalProgressBar({ ratio, label }) {
   const pct = Math.round(Math.min(100, Math.max(0, ratio * 100)))
   return (
-    <div
-      className="goal-progress"
-      role="progressbar"
-      aria-valuenow={pct}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-label={label}
-    >
+    <div className="goal-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={label}>
       <div className="goal-progress-fill" style={{ width: `${pct}%` }} />
     </div>
   )
@@ -1854,13 +1717,7 @@ function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcu
           <label className="sr-only" htmlFor="home-quick-category">
             Category
           </label>
-          <select
-            id="home-quick-category"
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-            required
-            disabled={submitting}
-          >
+          <select id="home-quick-category" value={category} onChange={(event) => setCategory(event.target.value)} required disabled={submitting}>
             <option value="">Select category</option>
             {categories.map((c) => (
               <option key={c} value={c}>
@@ -1917,16 +1774,7 @@ function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcu
   )
 }
 
-function DashboardPage({
-  totals,
-  charts,
-  budgetInsights,
-  trendView,
-  onTrendViewChange,
-  goals,
-  loans,
-  onGoalBlurPersist,
-}) {
+function DashboardPage({ totals, charts, budgetInsights, trendView, onTrendViewChange, goals, loans, onGoalBlurPersist }) {
   const emergencyTarget = parseAmount(goals?.emergencyFundTarget)
   const emergencySaved = parseAmount(goals?.emergencyFundSaved)
   const emergencyRatio = emergencyTarget > 0 ? Math.min(1, emergencySaved / emergencyTarget) : 0
@@ -1953,14 +1801,9 @@ function DashboardPage({
               placeholder="e.g. 120000"
             />
           </div>
-          <GoalProgressBar
-            ratio={emergencyRatio}
-            label="Emergency fund progress toward target"
-          />
+          <GoalProgressBar ratio={emergencyRatio} label="Emergency fund progress toward target" />
           <p className="goal-progress-caption">
-            {emergencyTarget > 0
-              ? `${moneyFormatter.format(emergencySaved)} of ${moneyFormatter.format(emergencyTarget)}`
-              : 'Set a target to see progress.'}
+            {emergencyTarget > 0 ? `${moneyFormatter.format(emergencySaved)} of ${moneyFormatter.format(emergencyTarget)}` : 'Set a target to see progress.'}
           </p>
         </div>
 
@@ -1976,9 +1819,7 @@ function DashboardPage({
                 <li key={`loan-goal-${loan.name || i}-${i}`}>
                   <div className="loan-goal-head">
                     <strong>{loan.name || 'Loan'}</strong>
-                    <span className="loan-goal-date">
-                      Payoff {payoff ? formatIsoDateReadable(payoff) : '— (add start date & tenure)'}
-                    </span>
+                    <span className="loan-goal-date">Payoff {payoff ? formatIsoDateReadable(payoff) : '— (add start date & tenure)'}</span>
                   </div>
                   <GoalProgressBar ratio={paidRatio} label={`${loan.name || 'Loan'} principal paid`} />
                 </li>
@@ -2031,9 +1872,7 @@ function DashboardPage({
         </article>
         <article className="stat">
           <h4>MF + Stocks Gain/Loss</h4>
-          <span className={totals.marketGainLoss >= 0 ? 'gain' : 'loss'}>
-            {moneyFormatter.format(totals.marketGainLoss)}
-          </span>
+          <span className={totals.marketGainLoss >= 0 ? 'gain' : 'loss'}>{moneyFormatter.format(totals.marketGainLoss)}</span>
         </article>
         <article className="stat">
           <h4>Net Worth</h4>
@@ -2064,9 +1903,7 @@ function DashboardPage({
         <div className="card">
           <h3>Budget vs Actual</h3>
           <ul className="item-list">
-            {budgetInsights.length === 0 && (
-              <li className="empty-row">Set category budgets to see over/under alerts.</li>
-            )}
+            {budgetInsights.length === 0 && <li className="empty-row">Set category budgets to see over/under alerts.</li>}
             {budgetInsights.map((item) => (
               <li key={item.category}>
                 <div>
@@ -2093,9 +1930,7 @@ function DashboardPage({
                 <Currency value={item.value} />
               </li>
             ))}
-            {charts.spendsByCategory.length === 0 && (
-              <li className="empty-row">No expense data yet.</li>
-            )}
+            {charts.spendsByCategory.length === 0 && <li className="empty-row">No expense data yet.</li>}
           </ul>
           <h3 className="subhead">Biggest Expense Days</h3>
           <ul className="item-list">
@@ -2105,9 +1940,7 @@ function DashboardPage({
                 <Currency value={item.value} />
               </li>
             ))}
-            {charts.biggestDays.length === 0 && (
-              <li className="empty-row">No dated spends yet.</li>
-            )}
+            {charts.biggestDays.length === 0 && <li className="empty-row">No dated spends yet.</li>}
           </ul>
         </div>
       </section>
@@ -2140,9 +1973,7 @@ function App() {
 
   const [pinDraft, setPinDraft] = useState('')
   const pinEnabled = Boolean(String(state.settings?.pin || '').length > 0)
-  const [sessionUnlocked, setSessionUnlocked] = useState(
-    () => sessionStorage.getItem('finance-dash-session') === '1',
-  )
+  const [sessionUnlocked, setSessionUnlocked] = useState(() => sessionStorage.getItem('finance-dash-session') === '1')
 
   const [authUser, setAuthUser] = useState(null)
   const [sendingOtp, setSendingOtp] = useState(false)
@@ -2168,11 +1999,9 @@ function App() {
     let uid = authUserIdRef.current
     if (!uid) {
       try {
-        const { data: { session } } = await withTimeout(
-          supabase.auth.getSession(),
-          15_000,
-          'Sign-in check',
-        )
+        const {
+          data: { session },
+        } = await withTimeout(supabase.auth.getSession(), 15_000, 'Sign-in check')
         uid = session?.user?.id ?? null
       } catch (e) {
         const msg = e?.message || 'Could not verify sign-in'
@@ -2251,7 +2080,9 @@ function App() {
       }
     }
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       setAuthUser(session?.user ?? null)
       if (event === 'SIGNED_OUT') {
         setCloudError(null)
@@ -2276,7 +2107,9 @@ function App() {
           setCloudError(formatAuthCloudError(magic.error))
         }
 
-        const { data: { session } } = await supabase.auth.getSession()
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
         setAuthUser(session?.user ?? null)
         if (session?.user) {
           await hydrateFromCloud(session.user.id)
@@ -2342,12 +2175,7 @@ function App() {
 
     if (key === 'loans') {
       const emi = calculateLoanEmi(item.principal, item.rate, item.tenureMonths)
-      const outstanding = calculateLoanOutstanding(
-        item.principal,
-        item.rate,
-        item.tenureMonths,
-        item.paymentsMade,
-      )
+      const outstanding = calculateLoanOutstanding(item.principal, item.rate, item.tenureMonths, item.paymentsMade)
       normalized = {
         ...item,
         amount: String(outstanding),
@@ -2369,22 +2197,31 @@ function App() {
     }
 
     if (key === 'mutualFunds' || key === 'stocks') {
-      const metrics = calculateHoldingMetrics(item.units, item.avgPrice, item.currentPrice)
-      const userNote = item.note ? ` | ${item.note}` : ''
+      const qtyStr = (v) =>
+        v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : ''
+      const unitsStr = qtyStr(item.units)
+      const avgStr = qtyStr(item.avgPrice)
+      const curStr = qtyStr(item.currentPrice)
+      const metrics = calculateHoldingMetrics(unitsStr, avgStr, curStr)
+      const userOnly = extractUserNoteFromHoldingStoredNote(item.note)
+      const userSuffix =
+        userOnly !== '' ? `${HOLDING_USER_NOTE_MARKER}${userOnly}` : ''
       const yearsHeld = yearsBetween(item.purchaseDate)
       const cagr = calculateCagr(metrics.invested, metrics.currentValue, yearsHeld)
       const cagrPart =
-        cagr !== null && yearsHeld >= 0.25 ? ` | CAGR ${(cagr * 100).toFixed(2)}%` : ''
+        cagr !== null && Number.isFinite(cagr) ? ` | CAGR ${(cagr * 100).toFixed(2)}%` : ''
       const realized = parseAmount(item.realizedGain)
-      const realizedPart =
-        realized !== 0 ? ` | Realized P/L ${moneyFormatter.format(realized)}` : ''
+      const realizedPart = realized !== 0 ? ` | Realized P/L ${moneyFormatter.format(realized)}` : ''
       normalized = {
         ...item,
         assetClass: item.assetClass || (key === 'stocks' ? 'Equity' : 'Equity'),
+        units: unitsStr,
+        avgPrice: avgStr,
+        currentPrice: curStr,
         amount: String(metrics.currentValue),
         invested: String(metrics.invested),
         gainLoss: String(metrics.gainLoss),
-        note: `Invested ${moneyFormatter.format(metrics.invested)} | Unrealized ${moneyFormatter.format(metrics.gainLoss)}${cagrPart}${realizedPart}${userNote}`,
+        note: `Invested ${moneyFormatter.format(metrics.invested)} | Unrealized ${moneyFormatter.format(metrics.gainLoss)}${cagrPart}${realizedPart}${userSuffix}`,
       }
     }
 
@@ -2436,9 +2273,7 @@ function App() {
 
   async function addSpendCategoryAndPersist(value) {
     await runPersist((prev) => {
-      const exists = prev.spendCategories.some(
-        (category) => category.toLowerCase() === value.toLowerCase(),
-      )
+      const exists = prev.spendCategories.some((category) => category.toLowerCase() === value.toLowerCase())
       if (exists) return prev
       return {
         ...prev,
@@ -2519,11 +2354,7 @@ function App() {
   }
 
   function exportData() {
-    const payload = JSON.stringify(
-      { data: stripBackupsForSnapshot(state), backups: state.backups || [] },
-      null,
-      2,
-    )
+    const payload = JSON.stringify({ data: stripBackupsForSnapshot(state), backups: state.backups || [] }, null, 2)
     const blob = new Blob([payload], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -2541,9 +2372,7 @@ function App() {
       void (async () => {
         try {
           const parsed = JSON.parse(String(reader.result))
-          const merged = parsed.data
-            ? migrateLoadedState({ ...parsed.data, backups: parsed.backups || [] })
-            : migrateLoadedState(parsed)
+          const merged = parsed.data ? migrateLoadedState({ ...parsed.data, backups: parsed.backups || [] }) : migrateLoadedState(parsed)
           flushSync(() => {
             setState(merged)
           })
@@ -2558,34 +2387,21 @@ function App() {
   }
 
   const totals = useMemo(() => {
-    const income =
-      parseAmount(state.monthlySalary) + parseAmount(state.extraIncome)
+    const income = parseAmount(state.monthlySalary) + parseAmount(state.extraIncome)
     const spends = getTotal(state.dailySpends)
     const creditDue = getTotal(state.creditCards)
     const emiDue = getTotal(state.emis)
     const loansDue = getTotal(state.loans)
     const liabilities = creditDue + emiDue + loansDue
     const liquidAssets = getTotal(state.assets)
-    const fdPrincipalTotal = state.fds.reduce(
-      (sum, item) => sum + parseAmount(item.principal ?? item.amount),
-      0,
-    )
-    const fdMaturityTotal = state.fds.reduce(
-      (sum, item) => sum + parseAmount(item.maturityValue ?? item.amount),
-      0,
-    )
-    const fdValueUsed =
-      state.netWorthBasis === 'fdMaturity' ? fdMaturityTotal : fdPrincipalTotal
+    const fdPrincipalTotal = state.fds.reduce((sum, item) => sum + parseAmount(item.principal ?? item.amount), 0)
+    const fdMaturityTotal = state.fds.reduce((sum, item) => sum + parseAmount(item.maturityValue ?? item.amount), 0)
+    const fdValueUsed = state.netWorthBasis === 'fdMaturity' ? fdMaturityTotal : fdPrincipalTotal
     const marketInvested =
-      state.mutualFunds.reduce((sum, item) => sum + parseAmount(item.invested), 0) +
-      state.stocks.reduce((sum, item) => sum + parseAmount(item.invested), 0)
+      state.mutualFunds.reduce((sum, item) => sum + parseAmount(item.invested), 0) + state.stocks.reduce((sum, item) => sum + parseAmount(item.invested), 0)
     const marketCurrentValue = getTotal(state.mutualFunds) + getTotal(state.stocks)
     const marketGainLoss = marketCurrentValue - marketInvested
-    const investments =
-      getTotal(state.mutualFunds) +
-      getTotal(state.stocks) +
-      fdValueUsed +
-      getTotal(state.rds)
+    const investments = getTotal(state.mutualFunds) + getTotal(state.stocks) + fdValueUsed + getTotal(state.rds)
     const totalAssets = liquidAssets + investments
     const netWorth = totalAssets - liabilities
 
@@ -2686,9 +2502,7 @@ function App() {
     return Object.entries(state.categoryBudgets ?? {})
       .map(([category, budgetValue]) => {
         const budget = parseAmount(budgetValue)
-        const spent = state.dailySpends
-          .filter((item) => item.name === category)
-          .reduce((sum, item) => sum + parseAmount(item.amount), 0)
+        const spent = state.dailySpends.filter((item) => item.name === category).reduce((sum, item) => sum + parseAmount(item.amount), 0)
         return {
           category,
           budget,
@@ -2702,10 +2516,7 @@ function App() {
 
   const todayStr = todayIsoLocal()
   const todaySpendsTotal = useMemo(
-    () =>
-      state.dailySpends
-        .filter((s) => s.date === todayStr)
-        .reduce((sum, s) => sum + parseAmount(s.amount), 0),
+    () => state.dailySpends.filter((s) => s.date === todayStr).reduce((sum, s) => sum + parseAmount(s.amount), 0),
     [state.dailySpends, todayStr],
   )
 
@@ -2775,10 +2586,7 @@ function App() {
 
   const showLock = pinEnabled && !sessionUnlocked
 
-  const fdValueForAllocation = (item) =>
-    state.netWorthBasis === 'fdMaturity'
-      ? parseAmount(item.maturityValue)
-      : parseAmount(item.principal ?? item.amount)
+  const fdValueForAllocation = (item) => (state.netWorthBasis === 'fdMaturity' ? parseAmount(item.maturityValue) : parseAmount(item.principal ?? item.amount))
 
   async function handleSetPin(val) {
     const p = String(val || '').trim()
@@ -2818,9 +2626,7 @@ function App() {
     try {
       await Promise.race([
         sendEmailOtp(email),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('OTP request timed out. Please try again.')), 15000),
-        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('OTP request timed out. Please try again.')), 15000)),
       ])
       return true
     } catch (e) {
@@ -2838,9 +2644,7 @@ function App() {
     try {
       await Promise.race([
         verifyEmailOtp(email, token),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('OTP verification timed out. Please retry.')), 15000),
-        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('OTP verification timed out. Please retry.')), 15000)),
       ])
       return true
     } catch (e) {
@@ -2855,12 +2659,7 @@ function App() {
     setSigningOut(true)
     setCloudError(null)
     try {
-      await Promise.race([
-        signOut(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Sign-out timed out. Clearing local session.')), 8000),
-        ),
-      ])
+      await Promise.race([signOut(), new Promise((_, reject) => setTimeout(() => reject(new Error('Sign-out timed out. Clearing local session.')), 8000))])
     } catch (e) {
       setCloudError(e?.message || 'Sign-out failed')
     } finally {
@@ -2896,11 +2695,7 @@ function App() {
   }
 
   return (
-    <main
-      className={`app ${isSidebarCollapsed ? 'sidebar-collapsed' : ''} ${
-        mobileNavOpen ? 'mobile-nav-open' : ''
-      }`}
-    >
+    <main className={`app ${isSidebarCollapsed ? 'sidebar-collapsed' : ''} ${mobileNavOpen ? 'mobile-nav-open' : ''}`}>
       <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-head">
           {!isSidebarCollapsed && <h2>Finance App</h2>}
@@ -2912,11 +2707,31 @@ function App() {
             title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             {isSidebarCollapsed ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
                 <path d="M9 18l6-6-6-6" />
               </svg>
             ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
                 <path d="M15 18l-6-6 6-6" />
               </svg>
             )}
@@ -2936,42 +2751,25 @@ function App() {
                 </div>
               )}
               {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  title={item.label}
-                  onClick={() => setMobileNavOpen(false)}
-                >
+                <NavLink key={item.to} to={item.to} title={item.label} onClick={() => setMobileNavOpen(false)}>
                   {!isSidebarCollapsed && item.icon && (
                     <span className="nav-item-icon" aria-hidden>
                       {item.icon}
                     </span>
                   )}
-                  <span className="nav-item-text">
-                    {isSidebarCollapsed ? item.shortLabel : item.label}
-                  </span>
+                  <span className="nav-item-text">{isSidebarCollapsed ? item.shortLabel : item.label}</span>
                 </NavLink>
               ))}
             </div>
           ))}
         </nav>
       </aside>
-      <button
-        type="button"
-        className="sidebar-backdrop"
-        aria-label="Close navigation"
-        onClick={() => setMobileNavOpen(false)}
-      />
+      <button type="button" className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />
 
       <section className="content">
         <header>
           <div className="mobile-header-row">
-            <button
-              type="button"
-              className="mobile-menu-btn"
-              aria-label="Open navigation menu"
-              onClick={() => setMobileNavOpen(true)}
-            >
+            <button type="button" className="mobile-menu-btn" aria-label="Open navigation menu" onClick={() => setMobileNavOpen(true)}>
               ☰
             </button>
             <h1>Personal Finance Dashboard</h1>
@@ -2979,8 +2777,7 @@ function App() {
           <p>Track each category on its own page, with one consolidated dashboard.</p>
           {!state.onboardingComplete && (
             <div className="onboard-banner">
-              New here?{' '}
-              <NavLink to="/onboarding">Open the setup checklist</NavLink>
+              New here? <NavLink to="/onboarding">Open the setup checklist</NavLink>
               {' · '}
               <button type="button" className="linkish" onClick={() => updateField('onboardingComplete', true)}>
                 Dismiss
@@ -2991,11 +2788,7 @@ function App() {
             {location.pathname === '/dashboard' && (
               <div className="basis-switch">
                 <label htmlFor="net-worth-basis">Net worth basis:</label>
-                <select
-                  id="net-worth-basis"
-                  value={state.netWorthBasis}
-                  onChange={(event) => updateField('netWorthBasis', event.target.value)}
-                >
+                <select id="net-worth-basis" value={state.netWorthBasis} onChange={(event) => updateField('netWorthBasis', event.target.value)}>
                   <option value="fdPrincipal">Use FD Principal</option>
                   <option value="fdMaturity">Use FD Maturity Value</option>
                 </select>
@@ -3016,369 +2809,348 @@ function App() {
 
         <section className="page">
           <Routes>
-          <Route path="/" element={<RootToHome />} />
-          <Route
-            path="/home"
-            element={
-              <HomeQuickPage
-                todayTotal={todaySpendsTotal}
-                todayIso={todayStr}
-                categories={state.spendCategories}
-                onQuickSpend={(item) => addItemAndPersist('dailySpends', item)}
-                shortcuts={homeShortcuts}
-              />
-            }
-          />
-          <Route
-            path="/dashboard"
-            element={
-              <DashboardPage
-                totals={totals}
-                charts={charts}
-                budgetInsights={budgetInsights}
-                trendView={trendView}
-                onTrendViewChange={setTrendView}
-                goals={state.goals}
-                loans={state.loans}
-                onGoalBlurPersist={(key, value) => updateGoalsAndPersist({ [key]: value })}
-              />
-            }
-          />
-          <Route
-            path="/budgets"
-            element={
-              <BudgetPage
-                categories={state.spendCategories}
-                budgets={state.categoryBudgets}
-                onSaveBudget={saveBudgetAndPersist}
-              />
-            }
-          />
-          <Route
-            path="/onboarding"
-            element={
-              <OnboardingPage onDone={() => updateField('onboardingComplete', true)} />
-            }
-          />
-          <Route
-            path="/loan-planning"
-            element={
-              <LoanPlanningPage
-                loans={state.loans}
-                creditCards={state.creditCards}
-                emis={state.emis}
-              />
-            }
-          />
-          <Route
-            path="/investments"
-            element={
-              <InvestmentsPage
-                state={state}
-                fdValueFn={fdValueForAllocation}
-                targets={state.allocationTargets}
-                onTargetChange={updateAllocationTargetAndPersist}
-              />
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <SettingsPage
-                pin={state.settings?.pin}
-                onSetPin={handleSetPin}
-                onClearPin={handleClearPin}
-                backups={state.backups || []}
-                onCreateBackup={createBackupAndPersist}
-                onRestore={restoreBackupAndPersist}
-                onDeleteBackup={deleteBackupAndPersist}
-                onExport={exportData}
-                onImportFile={importDataFile}
-                supabaseConfigured={isSupabaseConfigured()}
-                authUser={authUser}
-                sendingOtp={sendingOtp}
-                verifyingOtp={verifyingOtp}
-                signingOut={signingOut}
-                cloudError={cloudError}
-                cloudSync={cloudSync}
-                onSendEmailOtp={handleSendEmailOtp}
-                onVerifyEmailOtp={handleVerifyEmailOtp}
-                onSignOut={handleSignOut}
-              />
-            }
-          />
-          <Route
-            path="/income"
-            element={
-              <div className="cards-grid">
-                <SingleFieldCard
-                  label="Monthly Salary"
-                  helper="Your primary monthly take-home."
-                  value={state.monthlySalary}
-                  onBlurPersist={(value) => updateField('monthlySalary', value)}
-                  placeholder="e.g. 100000"
+            <Route path="/" element={<RootToHome />} />
+            <Route
+              path="/home"
+              element={
+                <HomeQuickPage
+                  todayTotal={todaySpendsTotal}
+                  todayIso={todayStr}
+                  categories={state.spendCategories}
+                  onQuickSpend={(item) => addItemAndPersist('dailySpends', item)}
+                  shortcuts={homeShortcuts}
                 />
-                <SingleFieldCard
-                  label="Extra Monthly Income"
-                  helper="Freelancing, rent, side income, etc."
-                  value={state.extraIncome}
-                  onBlurPersist={(value) => updateField('extraIncome', value)}
-                  placeholder="e.g. 15000"
+              }
+            />
+            <Route
+              path="/dashboard"
+              element={
+                <DashboardPage
+                  totals={totals}
+                  charts={charts}
+                  budgetInsights={budgetInsights}
+                  trendView={trendView}
+                  onTrendViewChange={setTrendView}
+                  goals={state.goals}
+                  loans={state.loans}
+                  onGoalBlurPersist={(key, value) => updateGoalsAndPersist({ [key]: value })}
                 />
-              </div>
-            }
-          />
-          <Route
-            path="/daily-spends"
-            element={
-              <DailySpendsPage
-                items={state.dailySpends}
-                total={totals.spends}
-                categories={state.spendCategories}
-                onAddItem={(item) => addItemAndPersist('dailySpends', item)}
-                onUpdateItem={(index, item) => updateItemAndPersist('dailySpends', index, item)}
-                onDeleteItem={(index) => deleteItemAndPersist('dailySpends', index)}
-                onAddCategory={addSpendCategoryAndPersist}
-                onDeleteCategory={deleteSpendCategoryAndPersist}
-              />
-            }
-          />
-          <Route
-            path="/spend-categories"
-            element={
-              <SpendCategoriesPage
-                categories={state.spendCategories}
-                onAdd={addSpendCategoryAndPersist}
-                onDelete={deleteSpendCategoryAndPersist}
-              />
-            }
-          />
-          <Route
-            path="/credit-cards"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Credit Cards Pending"
-                  helper="Outstanding dues per card."
-                  items={state.creditCards}
-                  onAdd={(item) => addItemAndPersist('creditCards', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('creditCards', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('creditCards', index)}
-                  total={totals.creditDue}
-                  fields={[
-                    { key: 'name', placeholder: 'Card name' },
-                    { key: 'amount', type: 'number', placeholder: 'Pending amount' },
-                    { key: 'dueDay', type: 'number', placeholder: 'Due day 1–28' },
-                    { key: 'note', placeholder: 'Notes or yyyy-mm-dd due' },
-                  ]}
+              }
+            />
+            <Route
+              path="/budgets"
+              element={<BudgetPage categories={state.spendCategories} budgets={state.categoryBudgets} onSaveBudget={saveBudgetAndPersist} />}
+            />
+            <Route path="/onboarding" element={<OnboardingPage onDone={() => updateField('onboardingComplete', true)} />} />
+            <Route path="/loan-planning" element={<LoanPlanningPage loans={state.loans} creditCards={state.creditCards} emis={state.emis} />} />
+            <Route
+              path="/investments"
+              element={
+                <InvestmentsPage
+                  state={state}
+                  fdValueFn={fdValueForAllocation}
+                  targets={state.allocationTargets}
+                  onTargetChange={updateAllocationTargetAndPersist}
                 />
-              </div>
-            }
-          />
-          <Route
-            path="/emis"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Active EMIs"
-                  helper="Your monthly EMI obligations."
-                  items={state.emis}
-                  onAdd={(item) => addItemAndPersist('emis', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('emis', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('emis', index)}
-                  total={totals.emiDue}
-                  fields={[
-                    { key: 'name', placeholder: 'EMI name' },
-                    { key: 'amount', type: 'number', placeholder: 'Monthly EMI' },
-                    { key: 'dueDay', type: 'number', placeholder: 'Due day 1–28' },
-                    { key: 'note', placeholder: 'Months left (optional)' },
-                  ]}
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <SettingsPage
+                  pin={state.settings?.pin}
+                  onSetPin={handleSetPin}
+                  onClearPin={handleClearPin}
+                  backups={state.backups || []}
+                  onCreateBackup={createBackupAndPersist}
+                  onRestore={restoreBackupAndPersist}
+                  onDeleteBackup={deleteBackupAndPersist}
+                  onExport={exportData}
+                  onImportFile={importDataFile}
+                  supabaseConfigured={isSupabaseConfigured()}
+                  authUser={authUser}
+                  sendingOtp={sendingOtp}
+                  verifyingOtp={verifyingOtp}
+                  signingOut={signingOut}
+                  cloudError={cloudError}
+                  cloudSync={cloudSync}
+                  onSendEmailOtp={handleSendEmailOtp}
+                  onVerifyEmailOtp={handleVerifyEmailOtp}
+                  onSignOut={handleSignOut}
                 />
-              </div>
-            }
-          />
-          <Route
-            path="/loans"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Loans"
-                  helper="EMI and outstanding are auto-calculated."
-                  items={state.loans}
-                  onAdd={(item) => addItemAndPersist('loans', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('loans', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('loans', index)}
-                  total={totals.loansDue}
-                  fields={[
-                    { key: 'name', placeholder: 'Loan name' },
-                    { key: 'principal', type: 'number', placeholder: 'Principal' },
-                    { key: 'rate', type: 'number', placeholder: 'Rate % p.a.' },
-                    { key: 'tenureMonths', type: 'number', placeholder: 'Tenure (months)' },
-                    { key: 'startDate', type: 'date', placeholder: 'Start date' },
-                    { key: 'paymentsMade', type: 'number', placeholder: 'Payments made' },
-                  ]}
+              }
+            />
+            <Route
+              path="/income"
+              element={
+                <div className="cards-grid">
+                  <SingleFieldCard
+                    label="Monthly Salary"
+                    helper="Your primary monthly take-home."
+                    value={state.monthlySalary}
+                    onBlurPersist={(value) => updateField('monthlySalary', value)}
+                    placeholder="e.g. 100000"
+                  />
+                  <SingleFieldCard
+                    label="Extra Monthly Income"
+                    helper="Freelancing, rent, side income, etc."
+                    value={state.extraIncome}
+                    onBlurPersist={(value) => updateField('extraIncome', value)}
+                    placeholder="e.g. 15000"
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/daily-spends"
+              element={
+                <DailySpendsPage
+                  items={state.dailySpends}
+                  total={totals.spends}
+                  categories={state.spendCategories}
+                  onAddItem={(item) => addItemAndPersist('dailySpends', item)}
+                  onUpdateItem={(index, item) => updateItemAndPersist('dailySpends', index, item)}
+                  onDeleteItem={(index) => deleteItemAndPersist('dailySpends', index)}
+                  onAddCategory={addSpendCategoryAndPersist}
+                  onDeleteCategory={deleteSpendCategoryAndPersist}
                 />
-              </div>
-            }
-          />
-          <Route
-            path="/assets"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Assets"
-                  helper="Land, gold, cash, or any owned asset."
-                  items={state.assets}
-                  onAdd={(item) => addItemAndPersist('assets', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('assets', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('assets', index)}
-                  total={totals.liquidAssets}
-                  fields={[
-                    { key: 'name', placeholder: 'Asset name' },
-                    {
-                      key: 'assetClass',
-                      type: 'select',
-                      placeholder: 'Asset class',
-                      options: ASSET_CLASSES,
-                    },
-                    { key: 'amount', type: 'number', placeholder: 'Current value' },
-                    { key: 'note', placeholder: 'Notes (optional)' },
-                  ]}
-                />
-              </div>
-            }
-          />
-          <Route
-            path="/mutual-funds"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Mutual Funds"
-                  helper="Auto-calculates current value and gain/loss from units and NAV."
-                  items={state.mutualFunds}
-                  onAdd={(item) => addItemAndPersist('mutualFunds', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('mutualFunds', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('mutualFunds', index)}
-                  total={getTotal(state.mutualFunds)}
-                  fields={[
-                    { key: 'name', placeholder: 'Fund name' },
-                    {
-                      key: 'assetClass',
-                      type: 'select',
-                      placeholder: 'Asset class',
-                      options: ASSET_CLASSES,
-                    },
-                    { key: 'units', type: 'number', placeholder: 'Units' },
-                    { key: 'avgPrice', type: 'number', placeholder: 'Avg NAV' },
-                    { key: 'currentPrice', type: 'number', placeholder: 'Current NAV' },
-                    { key: 'purchaseDate', type: 'date', placeholder: 'Purchase date (CAGR)' },
-                    { key: 'realizedGain', type: 'number', placeholder: 'Realized P/L' },
-                    { key: 'note', placeholder: 'Folio / Notes (optional)' },
-                  ]}
-                />
-              </div>
-            }
-          />
-          <Route
-            path="/stocks"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Stocks"
-                  helper="Auto-calculates current value and gain/loss from qty and prices."
-                  items={state.stocks}
-                  onAdd={(item) => addItemAndPersist('stocks', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('stocks', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('stocks', index)}
-                  total={getTotal(state.stocks)}
-                  fields={[
-                    { key: 'name', placeholder: 'Stock name' },
-                    {
-                      key: 'assetClass',
-                      type: 'select',
-                      placeholder: 'Asset class',
-                      options: ASSET_CLASSES,
-                    },
-                    { key: 'units', type: 'number', placeholder: 'Qty' },
-                    { key: 'avgPrice', type: 'number', placeholder: 'Avg buy price' },
-                    { key: 'currentPrice', type: 'number', placeholder: 'Current price' },
-                    { key: 'purchaseDate', type: 'date', placeholder: 'Purchase date (CAGR)' },
-                    { key: 'realizedGain', type: 'number', placeholder: 'Realized P/L' },
-                    { key: 'note', placeholder: 'Broker / Notes (optional)' },
-                  ]}
-                />
-              </div>
-            }
-          />
-          <Route
-            path="/fds"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Fixed Deposits (FD)"
-                  helper="Maturity date/value are auto-calculated."
-                  items={state.fds}
-                  onAdd={(item) => addItemAndPersist('fds', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('fds', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('fds', index)}
-                  total={totals.fdValueUsed}
-                  fields={[
-                    { key: 'name', placeholder: 'FD name' },
-                    {
-                      key: 'assetClass',
-                      type: 'select',
-                      placeholder: 'Asset class',
-                      options: ASSET_CLASSES,
-                    },
-                    { key: 'principal', type: 'number', placeholder: 'Principal' },
-                    { key: 'rate', type: 'number', placeholder: 'Rate % p.a.' },
-                    { key: 'tenureMonths', type: 'number', placeholder: 'Tenure (months)' },
-                    { key: 'startDate', type: 'date', placeholder: 'Start date' },
-                  ]}
-                />
-              </div>
-            }
-          />
-          <Route
-            path="/rds"
-            element={
-              <div className="cards-grid one-col">
-                <ListCard
-                  title="Recurring Deposits (RD)"
-                  helper="List total is current accrued value; maturity date and full maturity amount are in each row note."
-                  items={state.rds}
-                  onAdd={(item) => addItemAndPersist('rds', item)}
-                  onUpdate={(index, item) => updateItemAndPersist('rds', index, item)}
-                  onDelete={(index) => deleteItemAndPersist('rds', index)}
-                  total={getTotal(state.rds)}
-                  fields={[
-                    { key: 'name', placeholder: 'RD name' },
-                    {
-                      key: 'assetClass',
-                      type: 'select',
-                      placeholder: 'Asset class',
-                      options: ASSET_CLASSES,
-                    },
-                    { key: 'monthlyInstallment', type: 'number', placeholder: 'Monthly installment' },
-                    { key: 'rate', type: 'number', placeholder: 'Rate % p.a.' },
-                    { key: 'tenureMonths', type: 'number', placeholder: 'Tenure (months)' },
-                    { key: 'startDate', type: 'date', placeholder: 'Start date' },
-                  ]}
-                />
-              </div>
-            }
-          />
+              }
+            />
+            <Route
+              path="/spend-categories"
+              element={<SpendCategoriesPage categories={state.spendCategories} onAdd={addSpendCategoryAndPersist} onDelete={deleteSpendCategoryAndPersist} />}
+            />
+            <Route
+              path="/credit-cards"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Credit Cards Pending"
+                    helper="Outstanding dues per card."
+                    items={state.creditCards}
+                    onAdd={(item) => addItemAndPersist('creditCards', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('creditCards', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('creditCards', index)}
+                    total={totals.creditDue}
+                    fields={[
+                      { key: 'name', placeholder: 'Card name' },
+                      { key: 'amount', type: 'number', placeholder: 'Pending amount' },
+                      { key: 'dueDay', type: 'number', placeholder: 'Due day 1–28' },
+                      { key: 'note', placeholder: 'Notes or yyyy-mm-dd due' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/emis"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Active EMIs"
+                    helper="Your monthly EMI obligations."
+                    items={state.emis}
+                    onAdd={(item) => addItemAndPersist('emis', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('emis', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('emis', index)}
+                    total={totals.emiDue}
+                    fields={[
+                      { key: 'name', placeholder: 'EMI name' },
+                      { key: 'amount', type: 'number', placeholder: 'Monthly EMI' },
+                      { key: 'dueDay', type: 'number', placeholder: 'Due day 1–28' },
+                      { key: 'note', placeholder: 'Months left (optional)' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/loans"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Loans"
+                    helper="EMI and outstanding are auto-calculated."
+                    items={state.loans}
+                    onAdd={(item) => addItemAndPersist('loans', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('loans', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('loans', index)}
+                    total={totals.loansDue}
+                    fields={[
+                      { key: 'name', placeholder: 'Loan name' },
+                      { key: 'principal', type: 'number', placeholder: 'Principal' },
+                      { key: 'rate', type: 'number', placeholder: 'Rate % p.a.' },
+                      { key: 'tenureMonths', type: 'number', placeholder: 'Tenure (months)' },
+                      { key: 'startDate', type: 'date', placeholder: 'Start date' },
+                      { key: 'paymentsMade', type: 'number', placeholder: 'Payments made' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/assets"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Assets"
+                    helper="Land, gold, cash, or any owned asset."
+                    items={state.assets}
+                    onAdd={(item) => addItemAndPersist('assets', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('assets', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('assets', index)}
+                    total={totals.liquidAssets}
+                    fields={[
+                      { key: 'name', placeholder: 'Asset name' },
+                      {
+                        key: 'assetClass',
+                        type: 'select',
+                        placeholder: 'Asset class',
+                        options: ASSET_CLASSES,
+                      },
+                      { key: 'amount', type: 'number', placeholder: 'Current value' },
+                      { key: 'note', placeholder: 'Notes (optional)' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/mutual-funds"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Mutual Funds"
+                    helper="Auto-calculates current value and gain/loss from units and NAV."
+                    items={state.mutualFunds}
+                    onAdd={(item) => addItemAndPersist('mutualFunds', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('mutualFunds', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('mutualFunds', index)}
+                    total={getTotal(state.mutualFunds)}
+                    sanitizeEntryForEdit={(row) => ({
+                      ...row,
+                      note: extractUserNoteFromHoldingStoredNote(row.note),
+                    })}
+                    showHoldingReturnPct
+                    fields={[
+                      { key: 'name', placeholder: 'Fund name' },
+                      {
+                        key: 'assetClass',
+                        type: 'select',
+                        placeholder: 'Asset class',
+                        options: ASSET_CLASSES,
+                      },
+                      { key: 'units', type: 'number', placeholder: 'Units' },
+                      { key: 'avgPrice', type: 'number', placeholder: 'Avg NAV' },
+                      { key: 'currentPrice', type: 'number', placeholder: 'Current NAV' },
+                      { key: 'purchaseDate', type: 'date', placeholder: 'Purchase date (CAGR)' },
+                      { key: 'realizedGain', type: 'number', placeholder: 'Realized P/L' },
+                      { key: 'note', placeholder: 'Folio / Notes (optional)' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/stocks"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Stocks"
+                    helper="Auto-calculates current value and gain/loss from qty and prices."
+                    items={state.stocks}
+                    onAdd={(item) => addItemAndPersist('stocks', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('stocks', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('stocks', index)}
+                    total={getTotal(state.stocks)}
+                    sanitizeEntryForEdit={(row) => ({
+                      ...row,
+                      note: extractUserNoteFromHoldingStoredNote(row.note),
+                    })}
+                    showHoldingReturnPct
+                    fields={[
+                      { key: 'name', placeholder: 'Stock name' },
+                      {
+                        key: 'assetClass',
+                        type: 'select',
+                        placeholder: 'Asset class',
+                        options: ASSET_CLASSES,
+                      },
+                      { key: 'units', type: 'number', placeholder: 'Qty' },
+                      { key: 'avgPrice', type: 'number', placeholder: 'Avg buy price' },
+                      { key: 'currentPrice', type: 'number', placeholder: 'Current price' },
+                      { key: 'purchaseDate', type: 'date', placeholder: 'Purchase date (CAGR)' },
+                      { key: 'realizedGain', type: 'number', placeholder: 'Realized P/L' },
+                      { key: 'note', placeholder: 'Broker / Notes (optional)' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/fds"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Fixed Deposits (FD)"
+                    helper="Maturity date/value are auto-calculated."
+                    items={state.fds}
+                    onAdd={(item) => addItemAndPersist('fds', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('fds', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('fds', index)}
+                    total={totals.fdValueUsed}
+                    fields={[
+                      { key: 'name', placeholder: 'FD name' },
+                      {
+                        key: 'assetClass',
+                        type: 'select',
+                        placeholder: 'Asset class',
+                        options: ASSET_CLASSES,
+                      },
+                      { key: 'principal', type: 'number', placeholder: 'Principal' },
+                      { key: 'rate', type: 'number', placeholder: 'Rate % p.a.' },
+                      { key: 'tenureMonths', type: 'number', placeholder: 'Tenure (months)' },
+                      { key: 'startDate', type: 'date', placeholder: 'Start date' },
+                    ]}
+                  />
+                </div>
+              }
+            />
+            <Route
+              path="/rds"
+              element={
+                <div className="cards-grid one-col">
+                  <ListCard
+                    title="Recurring Deposits (RD)"
+                    helper="List total is current accrued value; maturity date and full maturity amount are in each row note."
+                    items={state.rds}
+                    onAdd={(item) => addItemAndPersist('rds', item)}
+                    onUpdate={(index, item) => updateItemAndPersist('rds', index, item)}
+                    onDelete={(index) => deleteItemAndPersist('rds', index)}
+                    total={getTotal(state.rds)}
+                    fields={[
+                      { key: 'name', placeholder: 'RD name' },
+                      {
+                        key: 'assetClass',
+                        type: 'select',
+                        placeholder: 'Asset class',
+                        options: ASSET_CLASSES,
+                      },
+                      { key: 'monthlyInstallment', type: 'number', placeholder: 'Monthly installment' },
+                      { key: 'rate', type: 'number', placeholder: 'Rate % p.a.' },
+                      { key: 'tenureMonths', type: 'number', placeholder: 'Tenure (months)' },
+                      { key: 'startDate', type: 'date', placeholder: 'Start date' },
+                    ]}
+                  />
+                </div>
+              }
+            />
           </Routes>
         </section>
       </section>
       <nav className="mobile-tabbar" aria-label="Quick navigation">
         {mobileTabs.map((tab) => (
-          <NavLink
-            key={tab.to}
-            to={tab.to}
-            className="mobile-tab-item"
-            onClick={() => setMobileNavOpen(false)}
-          >
+          <NavLink key={tab.to} to={tab.to} className="mobile-tab-item" onClick={() => setMobileNavOpen(false)}>
             <span className="mobile-tab-icon" aria-hidden>
               {tab.icon}
             </span>
