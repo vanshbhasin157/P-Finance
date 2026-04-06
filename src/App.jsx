@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import {
   fetchFinanceData,
@@ -323,7 +324,23 @@ function Currency({ value }) {
   return <span>{moneyFormatter.format(value)}</span>
 }
 
-function SingleFieldCard({ label, value, onChange, placeholder, helper }) {
+function SingleFieldCard({ label, value, onBlurPersist, placeholder, helper }) {
+  const [draft, setDraft] = useState(value)
+  const [syncing, setSyncing] = useState(false)
+  useEffect(() => {
+    setDraft(value)
+  }, [value])
+
+  async function handleBlur() {
+    if (String(draft) === String(value)) return
+    setSyncing(true)
+    try {
+      await Promise.resolve(onBlurPersist(draft))
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   return (
     <div className="card">
       <h3>{label}</h3>
@@ -331,10 +348,12 @@ function SingleFieldCard({ label, value, onChange, placeholder, helper }) {
       <input
         type="number"
         min="0"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={handleBlur}
         placeholder={placeholder}
       />
+      {syncing && <p className="helper field-sync-hint">Syncing to cloud…</p>}
     </div>
   )
 }
@@ -396,6 +415,8 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
   const [editingIndex, setEditingIndex] = useState(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [page, setPage] = useState(1)
+  const [submitSyncing, setSubmitSyncing] = useState(false)
+  const [deletingIndex, setDeletingIndex] = useState(null)
 
   function updateEntry(key, value) {
     setEntry((prev) => ({ ...prev, [key]: value }))
@@ -411,17 +432,24 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
     setDialogOpen(false)
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
     const hasAmountField = fields.some((field) => field.key === 'amount')
     if ('name' in entry && !String(entry.name).trim()) return
     if (hasAmountField && (!entry.amount || parseAmount(entry.amount) <= 0)) return
-    if (editingIndex !== null && onUpdate) {
-      onUpdate(editingIndex, entry)
-    } else {
-      onAdd(entry)
+    setSubmitSyncing(true)
+    try {
+      if (editingIndex !== null && onUpdate) {
+        await Promise.resolve(onUpdate(editingIndex, entry))
+      } else {
+        await Promise.resolve(onAdd(entry))
+      }
+      resetEntry()
+      setDialogOpen(false)
+    } catch {
+      /* cloudError shown in app header */
+    } finally {
+      setSubmitSyncing(false)
     }
-    resetEntry()
-    setDialogOpen(false)
   }
 
   function openAddDialog() {
@@ -477,6 +505,7 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
 
     function onKeyDown(event) {
       if (event.key === 'Escape') {
+        if (submitSyncing) return
         setEditingIndex(null)
         setEntry(Object.fromEntries(fields.map((field) => [field.key, ''])))
         setDialogOpen(false)
@@ -526,7 +555,7 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
         }
       }
     }
-  }, [dialogOpen, fields])
+  }, [dialogOpen, fields, submitSyncing])
 
   const dialogTitleId = `list-form-${title.replace(/\s+/g, '-')}`
 
@@ -538,7 +567,12 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
           <p className="card-total">
             Total: <Currency value={total} />
           </p>
-          <button type="button" className="btn-add-new" onClick={openAddDialog}>
+          <button
+            type="button"
+            className="btn-add-new"
+            onClick={openAddDialog}
+            disabled={submitSyncing || deletingIndex !== null}
+          >
             Add new
           </button>
         </div>
@@ -601,12 +635,31 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
             <p className="list-card-row-meta">{listItemDetailsCell(item)}</p>
             <div className="list-card-row-actions">
               {onUpdate && (
-                <button type="button" onClick={() => beginEdit(originalIndex)}>
+                <button
+                  type="button"
+                  disabled={deletingIndex !== null}
+                  onClick={() => beginEdit(originalIndex)}
+                >
                   Edit
                 </button>
               )}
-              <button type="button" onClick={() => onDelete(originalIndex)}>
-                Remove
+              <button
+                type="button"
+                disabled={deletingIndex !== null}
+                onClick={() => {
+                  void (async () => {
+                    setDeletingIndex(originalIndex)
+                    try {
+                      await Promise.resolve(onDelete(originalIndex))
+                    } catch {
+                      /* header */
+                    } finally {
+                      setDeletingIndex(null)
+                    }
+                  })()
+                }}
+              >
+                {deletingIndex === originalIndex ? 'Removing…' : 'Remove'}
               </button>
             </div>
           </div>
@@ -658,12 +711,31 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
                 <td className="list-table-actions">
                   <div className="table-row-actions">
                     {onUpdate && (
-                      <button type="button" onClick={() => beginEdit(originalIndex)}>
+                      <button
+                        type="button"
+                        disabled={deletingIndex !== null}
+                        onClick={() => beginEdit(originalIndex)}
+                      >
                         Edit
                       </button>
                     )}
-                    <button type="button" onClick={() => onDelete(originalIndex)}>
-                      Remove
+                    <button
+                      type="button"
+                      disabled={deletingIndex !== null}
+                      onClick={() => {
+                        void (async () => {
+                          setDeletingIndex(originalIndex)
+                          try {
+                            await Promise.resolve(onDelete(originalIndex))
+                          } catch {
+                            /* header */
+                          } finally {
+                            setDeletingIndex(null)
+                          }
+                        })()
+                      }}
+                    >
+                      {deletingIndex === originalIndex ? 'Removing…' : 'Remove'}
                     </button>
                   </div>
                 </td>
@@ -713,7 +785,13 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
       )}
 
       {dialogOpen && (
-        <div className="modal-backdrop" role="presentation" onClick={closeDialog}>
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => {
+            if (!submitSyncing) closeDialog()
+          }}
+        >
           <div
             ref={modalPanelRef}
             className="modal-panel"
@@ -727,7 +805,13 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
               <h3 id={dialogTitleId}>
                 {editingIndex !== null ? 'Edit entry' : 'Add new'} — {title}
               </h3>
-              <button type="button" className="modal-close" onClick={closeDialog} aria-label="Close">
+              <button
+                type="button"
+                className="modal-close"
+                onClick={closeDialog}
+                disabled={submitSyncing}
+                aria-label="Close"
+              >
                 ×
               </button>
             </div>
@@ -781,11 +865,25 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
               </div>
             </div>
             <div className="modal-footer">
-              <button type="button" className="ghost-btn modal-footer-btn" onClick={closeDialog}>
+              <button
+                type="button"
+                className="ghost-btn modal-footer-btn"
+                onClick={closeDialog}
+                disabled={submitSyncing}
+              >
                 Cancel
               </button>
-              <button type="button" className="add-btn modal-footer-btn" onClick={handleSubmit}>
-                {editingIndex !== null ? 'Save changes' : 'Add entry'}
+              <button
+                type="button"
+                className="add-btn modal-footer-btn"
+                disabled={submitSyncing}
+                onClick={() => void handleSubmit()}
+              >
+                {submitSyncing
+                  ? 'Syncing to cloud…'
+                  : editingIndex !== null
+                    ? 'Save changes'
+                    : 'Add entry'}
               </button>
             </div>
           </div>
@@ -797,12 +895,29 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
 
 function SpendCategoriesPage({ categories, onAdd, onDelete }) {
   const [newCategory, setNewCategory] = useState('')
+  const [addSyncing, setAddSyncing] = useState(false)
+  const [deleting, setDeleting] = useState(null)
 
-  function handleAddCategory() {
+  async function handleAddCategory() {
     const cleaned = newCategory.trim()
-    if (!cleaned) return
-    onAdd(cleaned)
-    setNewCategory('')
+    if (!cleaned || addSyncing) return
+    setAddSyncing(true)
+    try {
+      await Promise.resolve(onAdd(cleaned))
+      setNewCategory('')
+    } finally {
+      setAddSyncing(false)
+    }
+  }
+
+  async function handleDelete(category) {
+    if (deleting) return
+    setDeleting(category)
+    try {
+      await Promise.resolve(onDelete(category))
+    } finally {
+      setDeleting(null)
+    }
   }
 
   return (
@@ -818,9 +933,15 @@ function SpendCategoriesPage({ categories, onAdd, onDelete }) {
             value={newCategory}
             onChange={(event) => setNewCategory(event.target.value)}
             placeholder="e.g. Travel"
+            disabled={addSyncing}
           />
-          <button className="add-btn" type="button" onClick={handleAddCategory}>
-            Add Category
+          <button
+            className="add-btn"
+            type="button"
+            onClick={handleAddCategory}
+            disabled={addSyncing}
+          >
+            {addSyncing ? 'Syncing to cloud…' : 'Add Category'}
           </button>
         </div>
 
@@ -834,8 +955,12 @@ function SpendCategoriesPage({ categories, onAdd, onDelete }) {
                 <strong>{category}</strong>
               </div>
               <div className="row-actions">
-                <button type="button" onClick={() => onDelete(category)}>
-                  Remove
+                <button
+                  type="button"
+                  onClick={() => handleDelete(category)}
+                  disabled={deleting !== null}
+                >
+                  {deleting === category ? 'Removing…' : 'Remove'}
                 </button>
               </div>
             </li>
@@ -883,12 +1008,29 @@ function DailySpendsPage({
   onDeleteCategory,
 }) {
   const [newCategory, setNewCategory] = useState('')
+  const [addSyncing, setAddSyncing] = useState(false)
+  const [deleting, setDeleting] = useState(null)
 
-  function handleAddCategory() {
+  async function handleAddCategory() {
     const cleaned = newCategory.trim()
-    if (!cleaned) return
-    onAddCategory(cleaned)
-    setNewCategory('')
+    if (!cleaned || addSyncing) return
+    setAddSyncing(true)
+    try {
+      await Promise.resolve(onAddCategory(cleaned))
+      setNewCategory('')
+    } finally {
+      setAddSyncing(false)
+    }
+  }
+
+  async function handleDeleteCategory(category) {
+    if (deleting) return
+    setDeleting(category)
+    try {
+      await Promise.resolve(onDeleteCategory(category))
+    } finally {
+      setDeleting(null)
+    }
   }
 
   return (
@@ -925,9 +1067,15 @@ function DailySpendsPage({
             value={newCategory}
             onChange={(event) => setNewCategory(event.target.value)}
             placeholder="e.g. Entertainment"
+            disabled={addSyncing}
           />
-          <button className="add-btn" type="button" onClick={handleAddCategory}>
-            Add Category
+          <button
+            className="add-btn"
+            type="button"
+            onClick={handleAddCategory}
+            disabled={addSyncing}
+          >
+            {addSyncing ? 'Syncing to cloud…' : 'Add Category'}
           </button>
         </div>
         <ul className="item-list">
@@ -935,8 +1083,12 @@ function DailySpendsPage({
             <li key={category}>
               <strong>{category}</strong>
               <div className="row-actions">
-                <button type="button" onClick={() => onDeleteCategory(category)}>
-                  Remove
+                <button
+                  type="button"
+                  onClick={() => handleDeleteCategory(category)}
+                  disabled={deleting !== null}
+                >
+                  {deleting === category ? 'Removing…' : 'Remove'}
                 </button>
               </div>
             </li>
@@ -947,26 +1099,57 @@ function DailySpendsPage({
   )
 }
 
+function BudgetCategoryRow({ category, budgetValue, onCommit }) {
+  const [local, setLocal] = useState(budgetValue ?? '')
+  const [syncing, setSyncing] = useState(false)
+  useEffect(() => {
+    setLocal(budgetValue ?? '')
+  }, [budgetValue])
+
+  async function handleBlur() {
+    if (String(local) === String(budgetValue ?? '')) return
+    setSyncing(true)
+    try {
+      await Promise.resolve(onCommit(category, local))
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  return (
+    <li>
+      <strong>{category}</strong>
+      <div className="row-actions budget-row-sync" style={{ flexWrap: 'wrap', gap: '0.35rem' }}>
+        <input
+          type="number"
+          min="0"
+          placeholder="Monthly budget"
+          value={local}
+          onChange={(event) => setLocal(event.target.value)}
+          onBlur={handleBlur}
+        />
+        {syncing && <span className="helper">Syncing to cloud…</span>}
+      </div>
+    </li>
+  )
+}
+
 function BudgetPage({ categories, budgets, onSaveBudget }) {
   return (
     <div className="cards-grid one-col">
       <div className="card">
         <h3>Monthly Category Budgets</h3>
-        <p className="helper">Set monthly limits used for dashboard over/under alerts.</p>
+        <p className="helper">
+          Set monthly limits used for dashboard over/under alerts. Values save when you leave each field.
+        </p>
         <ul className="item-list">
           {categories.map((category) => (
-            <li key={category}>
-              <strong>{category}</strong>
-              <div className="row-actions">
-                <input
-                  type="number"
-                  min="0"
-                  placeholder="Monthly budget"
-                  value={budgets[category] ?? ''}
-                  onChange={(event) => onSaveBudget(category, event.target.value)}
-                />
-              </div>
-            </li>
+            <BudgetCategoryRow
+              key={category}
+              category={category}
+              budgetValue={budgets[category]}
+              onCommit={onSaveBudget}
+            />
           ))}
         </ul>
       </div>
@@ -1189,6 +1372,47 @@ function LoanPlanningPage({ loans, creditCards, emis }) {
   )
 }
 
+function AllocationTargetRow({ cls, act, tgt, targetStr, onCommit }) {
+  const [local, setLocal] = useState(targetStr ?? '')
+  const [syncing, setSyncing] = useState(false)
+  useEffect(() => {
+    setLocal(targetStr ?? '')
+  }, [targetStr])
+
+  async function handleBlur() {
+    if (String(local) === String(targetStr ?? '')) return
+    setSyncing(true)
+    try {
+      await Promise.resolve(onCommit(cls, local))
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  return (
+    <li>
+      <div>
+        <strong>{cls}</strong>
+        <small>
+          Actual {act.toFixed(1)}% vs target {tgt.toFixed(1)}%
+        </small>
+      </div>
+      <div className="row-actions budget-row-sync" style={{ flexWrap: 'wrap', gap: '0.35rem' }}>
+        <input
+          type="number"
+          min="0"
+          max="100"
+          className="target-input"
+          value={local}
+          onChange={(e) => setLocal(e.target.value)}
+          onBlur={handleBlur}
+        />
+        {syncing && <span className="helper">Syncing to cloud…</span>}
+      </div>
+    </li>
+  )
+}
+
 function InvestmentsPage({ state, fdValueFn, targets, onTargetChange }) {
   const buckets = sumAllocationByClass(state, fdValueFn)
   const slices = Object.entries(buckets).map(([label, value]) => ({ label, value }))
@@ -1213,25 +1437,19 @@ function InvestmentsPage({ state, fdValueFn, targets, onTargetChange }) {
       </div>
       <div className="card">
         <h3>Target vs actual</h3>
-        <p className="helper">Set target % per class. Rebalance hint is simplified (largest gap).</p>
+        <p className="helper">
+          Set target % per class. Values save when you leave each field. Rebalance hint is simplified (largest gap).
+        </p>
         <ul className="item-list">
           {rows.map((row) => (
-            <li key={row.cls}>
-              <div>
-                <strong>{row.cls}</strong>
-                <small>
-                  Actual {row.act.toFixed(1)}% vs target {row.tgt.toFixed(1)}%
-                </small>
-              </div>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                className="target-input"
-                value={targets[row.cls] ?? ''}
-                onChange={(e) => onTargetChange(row.cls, e.target.value)}
-              />
-            </li>
+            <AllocationTargetRow
+              key={row.cls}
+              cls={row.cls}
+              act={row.act}
+              tgt={row.tgt}
+              targetStr={targets[row.cls]}
+              onCommit={onTargetChange}
+            />
           ))}
         </ul>
         {total > 0 && overweight && underweight && Math.abs(overweight.diff) > 1 && (
@@ -1268,7 +1486,11 @@ function SettingsPage({
   onSignOut,
 }) {
   const [pinInput, setPinInput] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
   const [backupLabel, setBackupLabel] = useState('')
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [restoreBusyId, setRestoreBusyId] = useState(null)
+  const [deleteBusyId, setDeleteBusyId] = useState(null)
   const [emailInput, setEmailInput] = useState('')
   const [otpInput, setOtpInput] = useState('')
   const [otpSentFor, setOtpSentFor] = useState('')
@@ -1384,14 +1606,40 @@ function SettingsPage({
             placeholder="New PIN (4–8 digits)"
             value={pinInput}
             onChange={(e) => setPinInput(e.target.value)}
+            disabled={pinBusy}
           />
-          <button type="button" className="add-btn" onClick={() => { onSetPin(pinInput); setPinInput('') }}>
-            Save PIN
+          <button
+            type="button"
+            className="add-btn"
+            disabled={pinBusy}
+            onClick={async () => {
+              setPinBusy(true)
+              try {
+                await Promise.resolve(onSetPin(pinInput))
+                setPinInput('')
+              } finally {
+                setPinBusy(false)
+              }
+            }}
+          >
+            {pinBusy ? 'Syncing to cloud…' : 'Save PIN'}
           </button>
         </div>
         {pin && (
-          <button type="button" className="ghost-btn narrow" onClick={onClearPin}>
-            Remove PIN
+          <button
+            type="button"
+            className="ghost-btn narrow"
+            disabled={pinBusy}
+            onClick={async () => {
+              setPinBusy(true)
+              try {
+                await Promise.resolve(onClearPin())
+              } finally {
+                setPinBusy(false)
+              }
+            }}
+          >
+            {pinBusy ? 'Syncing…' : 'Remove PIN'}
           </button>
         )}
       </div>
@@ -1406,8 +1654,21 @@ function SettingsPage({
             value={backupLabel}
             onChange={(e) => setBackupLabel(e.target.value)}
           />
-          <button type="button" className="add-btn" onClick={() => { onCreateBackup(backupLabel); setBackupLabel('') }}>
-            Create backup
+          <button
+            type="button"
+            className="add-btn"
+            disabled={backupBusy || restoreBusyId !== null || deleteBusyId !== null}
+            onClick={async () => {
+              setBackupBusy(true)
+              try {
+                await Promise.resolve(onCreateBackup(backupLabel))
+                setBackupLabel('')
+              } finally {
+                setBackupBusy(false)
+              }
+            }}
+          >
+            {backupBusy ? 'Syncing to cloud…' : 'Create backup'}
           </button>
         </div>
         <ul className="item-list">
@@ -1419,11 +1680,33 @@ function SettingsPage({
                 <small>{new Date(b.at).toLocaleString()}</small>
               </div>
               <div className="row-actions">
-                <button type="button" onClick={() => onRestore(b.id)}>
-                  Restore
+                <button
+                  type="button"
+                  disabled={restoreBusyId !== null || deleteBusyId !== null || backupBusy}
+                  onClick={async () => {
+                    setRestoreBusyId(b.id)
+                    try {
+                      await Promise.resolve(onRestore(b.id))
+                    } finally {
+                      setRestoreBusyId(null)
+                    }
+                  }}
+                >
+                  {restoreBusyId === b.id ? 'Syncing…' : 'Restore'}
                 </button>
-                <button type="button" onClick={() => onDeleteBackup(b.id)}>
-                  Delete
+                <button
+                  type="button"
+                  disabled={restoreBusyId !== null || deleteBusyId !== null || backupBusy}
+                  onClick={async () => {
+                    setDeleteBusyId(b.id)
+                    try {
+                      await Promise.resolve(onDeleteBackup(b.id))
+                    } finally {
+                      setDeleteBusyId(null)
+                    }
+                  }}
+                >
+                  {deleteBusyId === b.id ? 'Removing…' : 'Delete'}
                 </button>
               </div>
             </li>
@@ -1473,6 +1756,41 @@ function OnboardingPage({ onDone }) {
   )
 }
 
+function GoalFundField({ label, goalKey, value, onBlurPersist, placeholder }) {
+  const [draft, setDraft] = useState(value ?? '')
+  const [syncing, setSyncing] = useState(false)
+  useEffect(() => {
+    setDraft(value ?? '')
+  }, [value])
+
+  async function handleBlur() {
+    if (String(draft) === String(value ?? '')) return
+    setSyncing(true)
+    try {
+      await Promise.resolve(onBlurPersist(goalKey, draft))
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  return (
+    <label className="goal-fund-field">
+      <span>{label}</span>
+      <input
+        type="number"
+        min="0"
+        step="any"
+        inputMode="decimal"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={handleBlur}
+        placeholder={placeholder}
+      />
+      {syncing && <span className="helper goal-sync-hint">Syncing to cloud…</span>}
+    </label>
+  )
+}
+
 function GoalProgressBar({ ratio, label }) {
   const pct = Math.round(Math.min(100, Math.max(0, ratio * 100)))
   return (
@@ -1493,21 +1811,29 @@ function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcu
   const [category, setCategory] = useState('')
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault()
     const cleaned = category.trim()
-    if (!cleaned || parseAmount(amount) <= 0) return
-    onQuickSpend({
-      name: cleaned,
-      amount,
-      date: todayIso,
-      tag: '',
-      attachment: '',
-      note: note.trim(),
-    })
-    setAmount('')
-    setNote('')
+    if (!cleaned || parseAmount(amount) <= 0 || submitting) return
+    setSubmitting(true)
+    try {
+      await Promise.resolve(
+        onQuickSpend({
+          name: cleaned,
+          amount,
+          date: todayIso,
+          tag: '',
+          attachment: '',
+          note: note.trim(),
+        }),
+      )
+      setAmount('')
+      setNote('')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -1532,6 +1858,7 @@ function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcu
             value={category}
             onChange={(event) => setCategory(event.target.value)}
             required
+            disabled={submitting}
           >
             <option value="">Select category</option>
             {categories.map((c) => (
@@ -1553,6 +1880,7 @@ function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcu
             onChange={(event) => setAmount(event.target.value)}
             placeholder="Amount"
             required
+            disabled={submitting}
           />
           <label className="sr-only" htmlFor="home-quick-note">
             Note (optional)
@@ -1563,9 +1891,10 @@ function HomeQuickPage({ todayTotal, todayIso, categories, onQuickSpend, shortcu
             value={note}
             onChange={(event) => setNote(event.target.value)}
             placeholder="Note (optional)"
+            disabled={submitting}
           />
-          <button type="submit" className="add-btn home-quick-submit">
-            Add to today
+          <button type="submit" className="add-btn home-quick-submit" disabled={submitting}>
+            {submitting ? 'Syncing to cloud…' : 'Add to today'}
           </button>
         </form>
       </div>
@@ -1595,7 +1924,7 @@ function DashboardPage({
   onTrendViewChange,
   goals,
   loans,
-  onGoalFieldChange,
+  onGoalBlurPersist,
 }) {
   const emergencyTarget = parseAmount(goals?.emergencyFundTarget)
   const emergencySaved = parseAmount(goals?.emergencyFundSaved)
@@ -1606,32 +1935,22 @@ function DashboardPage({
       <section className="cards-grid two-col goals-section">
         <div className="card">
           <h3>Emergency fund</h3>
-          <p className="helper">Target vs amount you have set aside (manual entry).</p>
+          <p className="helper">Target vs amount you have set aside (manual entry). Saves when you leave each field.</p>
           <div className="goal-inputs">
-            <label>
-              <span>Target</span>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                inputMode="decimal"
-                value={goals?.emergencyFundTarget ?? ''}
-                onChange={(event) => onGoalFieldChange('emergencyFundTarget', event.target.value)}
-                placeholder="e.g. 500000"
-              />
-            </label>
-            <label>
-              <span>Saved so far</span>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                inputMode="decimal"
-                value={goals?.emergencyFundSaved ?? ''}
-                onChange={(event) => onGoalFieldChange('emergencyFundSaved', event.target.value)}
-                placeholder="e.g. 120000"
-              />
-            </label>
+            <GoalFundField
+              label="Target"
+              goalKey="emergencyFundTarget"
+              value={goals?.emergencyFundTarget}
+              onBlurPersist={onGoalBlurPersist}
+              placeholder="e.g. 500000"
+            />
+            <GoalFundField
+              label="Saved so far"
+              goalKey="emergencyFundSaved"
+              value={goals?.emergencyFundSaved}
+              onBlurPersist={onGoalBlurPersist}
+              placeholder="e.g. 120000"
+            />
           </div>
           <GoalProgressBar
             ratio={emergencyRatio}
@@ -1840,6 +2159,45 @@ function App() {
   remoteHydratedRef.current = remoteHydrated
   authUserIdRef.current = authUser?.id ?? null
 
+  const syncStateToCloud = useCallback(async (snapshot, options = {}) => {
+    const force = Boolean(options.force)
+    if (!isSupabaseConfigured() || !supabase) return
+    if (!force && !remoteHydratedRef.current) return
+
+    let uid = authUserIdRef.current
+    if (!uid) {
+      const { data: { session } } = await supabase.auth.getSession()
+      uid = session?.user?.id ?? null
+    }
+    if (!uid) return
+
+    setCloudSync('syncing')
+    try {
+      await upsertFinanceData(uid, snapshot)
+      setCloudSync('saved')
+      setCloudError(null)
+    } catch (e) {
+      const msg = e?.message || 'Cloud save failed'
+      setCloudSync('error')
+      setCloudError(msg)
+      throw new Error(msg)
+    }
+  }, [])
+
+  const runPersist = useCallback(
+    async (mutator) => {
+      let snap
+      flushSync(() => {
+        setState((prev) => {
+          snap = mutator(prev)
+          return snap
+        })
+      })
+      await syncStateToCloud(snap, { force: true })
+    },
+    [syncStateToCloud],
+  )
+
   function clearSupabaseLocalSessionKeys() {
     if (typeof window === 'undefined') return
     const keys = Object.keys(window.localStorage)
@@ -1926,37 +2284,18 @@ function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured() || !authUser?.id || !remoteHydrated) return
-    setCloudSync('syncing')
     const timer = setTimeout(() => {
-      upsertFinanceData(authUser.id, state)
-        .then(() => {
-          setCloudSync('saved')
-          setCloudError(null)
-        })
-        .catch((e) => {
-          setCloudSync('error')
-          setCloudError(e?.message || 'Cloud save failed')
-        })
+      void syncStateToCloud(state)
     }, 450)
     return () => clearTimeout(timer)
-  }, [state, authUser?.id, remoteHydrated])
+  }, [state, authUser?.id, remoteHydrated, syncStateToCloud])
 
   // Mobile: tab backgrounding often cancels the debounced save; flush before the page is hidden.
   useEffect(() => {
     if (!isSupabaseConfigured()) return
 
     function flushCloudFromRef() {
-      const uid = authUserIdRef.current
-      if (!uid || !remoteHydratedRef.current) return
-      void upsertFinanceData(uid, stateRef.current)
-        .then(() => {
-          setCloudSync('saved')
-          setCloudError(null)
-        })
-        .catch((e) => {
-          setCloudSync('error')
-          setCloudError(e?.message || 'Cloud save failed')
-        })
+      void syncStateToCloud(stateRef.current)
     }
 
     function onVisibility() {
@@ -1969,18 +2308,18 @@ function App() {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('pagehide', flushCloudFromRef)
     }
-  }, [])
+  }, [syncStateToCloud])
 
   useEffect(() => {
     setMobileNavOpen(false)
   }, [location.pathname])
 
-  function updateField(key, value) {
-    setState((prev) => ({ ...prev, [key]: value }))
+  async function updateField(key, value) {
+    await runPersist((prev) => ({ ...prev, [key]: value }))
   }
 
-  function updateGoals(patch) {
-    setState((prev) => ({
+  async function updateGoalsAndPersist(patch) {
+    await runPersist((prev) => ({
       ...prev,
       goals: { ...initialState.goals, ...(prev.goals || {}), ...patch },
     }))
@@ -2052,96 +2391,80 @@ function App() {
     return normalized
   }
 
-  function addItem(key, item) {
+  async function addItemAndPersist(key, item) {
     const createdAt = new Date().toISOString()
-    setState((prev) => {
+    await runPersist((prev) => {
       const normalized = normalizeItem(key, { ...item, createdAt })
       const withMeta = { ...normalized, createdAt: normalized.createdAt || createdAt }
-
-      const next = {
+      return {
         ...prev,
         [key]: [...prev[key], withMeta],
       }
-      return next
     })
   }
 
-  function deleteItem(key, index) {
-    setState((prev) => {
-      const next = {
-        ...prev,
-        [key]: prev[key].filter((_, itemIndex) => itemIndex !== index),
-      }
-      return next
-    })
+  async function deleteItemAndPersist(key, index) {
+    await runPersist((prev) => ({
+      ...prev,
+      [key]: prev[key].filter((_, itemIndex) => itemIndex !== index),
+    }))
   }
 
-  function updateItem(key, index, item) {
-    setState((prev) => {
+  async function updateItemAndPersist(key, index, item) {
+    await runPersist((prev) => {
       const nextItems = [...prev[key]]
       const prevRow = nextItems[index] || {}
       nextItems[index] = normalizeItem(key, {
         ...item,
         createdAt: prevRow.createdAt || item.createdAt || new Date().toISOString(),
       })
-      const next = { ...prev, [key]: nextItems }
-      return next
+      return { ...prev, [key]: nextItems }
     })
   }
 
-  function addSpendCategory(value) {
-    setState((prev) => {
+  async function addSpendCategoryAndPersist(value) {
+    await runPersist((prev) => {
       const exists = prev.spendCategories.some(
         (category) => category.toLowerCase() === value.toLowerCase(),
       )
       if (exists) return prev
-      const next = {
+      return {
         ...prev,
         spendCategories: [...prev.spendCategories, value],
       }
-      return next
     })
   }
 
-  function deleteSpendCategory(value) {
-    setState((prev) => {
-      const next = {
-        ...prev,
-        spendCategories: prev.spendCategories.filter((category) => category !== value),
-        dailySpends: prev.dailySpends.filter((spend) => spend.name !== value),
-      }
-      return next
-    })
+  async function deleteSpendCategoryAndPersist(value) {
+    await runPersist((prev) => ({
+      ...prev,
+      spendCategories: prev.spendCategories.filter((category) => category !== value),
+      dailySpends: prev.dailySpends.filter((spend) => spend.name !== value),
+    }))
   }
 
-  function saveBudget(category, value) {
-    setState((prev) => {
-      const next = {
-        ...prev,
-        categoryBudgets: {
-          ...prev.categoryBudgets,
-          [category]: String(parseAmount(value)),
-        },
-      }
-      return next
-    })
+  async function saveBudgetAndPersist(category, value) {
+    await runPersist((prev) => ({
+      ...prev,
+      categoryBudgets: {
+        ...prev.categoryBudgets,
+        [category]: String(parseAmount(value)),
+      },
+    }))
   }
 
-  function updateSettings(patch) {
-    setState((prev) => {
-      const next = { ...prev, settings: { ...prev.settings, ...patch } }
-      return next
-    })
+  async function updateSettingsAndPersist(patch) {
+    await runPersist((prev) => ({
+      ...prev,
+      settings: { ...prev.settings, ...patch },
+    }))
   }
 
-  function updateAllocationTarget(cls, value) {
-    setState((prev) => {
-      const next = {
-        ...prev,
-        allocationTargets: { ...prev.allocationTargets, [cls]: value },
-      }
-      return next
-    })
+  async function updateAllocationTargetAndPersist(cls, value) {
+    await runPersist((prev) => ({
+      ...prev,
+      allocationTargets: { ...prev.allocationTargets, [cls]: value },
+    }))
   }
 
   function stripBackupsForSnapshot(s) {
@@ -2149,8 +2472,8 @@ function App() {
     return rest
   }
 
-  function createBackup(label) {
-    setState((prev) => {
+  async function createBackupAndPersist(label) {
+    await runPersist((prev) => {
       const id = `bkp-${Date.now()}`
       const entry = {
         id,
@@ -2158,34 +2481,29 @@ function App() {
         label: label?.trim() || 'Backup',
         data: stripBackupsForSnapshot(prev),
       }
-      const next = {
+      return {
         ...prev,
         backups: [entry, ...(prev.backups || [])].slice(0, 15),
       }
-      return next
     })
   }
 
-  function restoreBackup(id) {
-    setState((prev) => {
+  async function restoreBackupAndPersist(id) {
+    await runPersist((prev) => {
       const entry = prev.backups?.find((b) => b.id === id)
       if (!entry?.data) return prev
-      const next = migrateLoadedState({
+      return migrateLoadedState({
         ...entry.data,
         backups: prev.backups,
       })
-      return next
     })
   }
 
-  function deleteBackup(id) {
-    setState((prev) => {
-      const next = {
-        ...prev,
-        backups: (prev.backups || []).filter((b) => b.id !== id),
-      }
-      return next
-    })
+  async function deleteBackupAndPersist(id) {
+    await runPersist((prev) => ({
+      ...prev,
+      backups: (prev.backups || []).filter((b) => b.id !== id),
+    }))
   }
 
   function exportData() {
@@ -2208,16 +2526,21 @@ function App() {
     if (!file) return
     const reader = new FileReader()
     reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result))
-        const merged = parsed.data
-          ? migrateLoadedState({ ...parsed.data, backups: parsed.backups || [] })
-          : migrateLoadedState(parsed)
-        setState(merged)
-      } catch {
-        /* ignore invalid */
-      }
-      event.target.value = ''
+      void (async () => {
+        try {
+          const parsed = JSON.parse(String(reader.result))
+          const merged = parsed.data
+            ? migrateLoadedState({ ...parsed.data, backups: parsed.backups || [] })
+            : migrateLoadedState(parsed)
+          flushSync(() => {
+            setState(merged)
+          })
+          await syncStateToCloud(merged, { force: true })
+        } catch {
+          /* ignore invalid */
+        }
+        event.target.value = ''
+      })()
     }
     reader.readAsText(file)
   }
@@ -2445,16 +2768,16 @@ function App() {
       ? parseAmount(item.maturityValue)
       : parseAmount(item.principal ?? item.amount)
 
-  function handleSetPin(val) {
+  async function handleSetPin(val) {
     const p = String(val || '').trim()
     if (p.length < 4 || p.length > 12) return
-    updateSettings({ pin: p })
+    await updateSettingsAndPersist({ pin: p })
     sessionStorage.setItem('finance-dash-session', '1')
     setSessionUnlocked(true)
   }
 
-  function handleClearPin() {
-    updateSettings({ pin: '' })
+  async function handleClearPin() {
+    await updateSettingsAndPersist({ pin: '' })
     sessionStorage.removeItem('finance-dash-session')
     setSessionUnlocked(true)
   }
@@ -2689,7 +3012,7 @@ function App() {
                 todayTotal={todaySpendsTotal}
                 todayIso={todayStr}
                 categories={state.spendCategories}
-                onQuickSpend={(item) => addItem('dailySpends', item)}
+                onQuickSpend={(item) => addItemAndPersist('dailySpends', item)}
                 shortcuts={homeShortcuts}
               />
             }
@@ -2705,7 +3028,7 @@ function App() {
                 onTrendViewChange={setTrendView}
                 goals={state.goals}
                 loans={state.loans}
-                onGoalFieldChange={(key, value) => updateGoals({ [key]: value })}
+                onGoalBlurPersist={(key, value) => updateGoalsAndPersist({ [key]: value })}
               />
             }
           />
@@ -2715,7 +3038,7 @@ function App() {
               <BudgetPage
                 categories={state.spendCategories}
                 budgets={state.categoryBudgets}
-                onSaveBudget={saveBudget}
+                onSaveBudget={saveBudgetAndPersist}
               />
             }
           />
@@ -2742,7 +3065,7 @@ function App() {
                 state={state}
                 fdValueFn={fdValueForAllocation}
                 targets={state.allocationTargets}
-                onTargetChange={updateAllocationTarget}
+                onTargetChange={updateAllocationTargetAndPersist}
               />
             }
           />
@@ -2754,9 +3077,9 @@ function App() {
                 onSetPin={handleSetPin}
                 onClearPin={handleClearPin}
                 backups={state.backups || []}
-                onCreateBackup={createBackup}
-                onRestore={restoreBackup}
-                onDeleteBackup={deleteBackup}
+                onCreateBackup={createBackupAndPersist}
+                onRestore={restoreBackupAndPersist}
+                onDeleteBackup={deleteBackupAndPersist}
                 onExport={exportData}
                 onImportFile={importDataFile}
                 supabaseConfigured={isSupabaseConfigured()}
@@ -2780,14 +3103,14 @@ function App() {
                   label="Monthly Salary"
                   helper="Your primary monthly take-home."
                   value={state.monthlySalary}
-                  onChange={(value) => updateField('monthlySalary', value)}
+                  onBlurPersist={(value) => updateField('monthlySalary', value)}
                   placeholder="e.g. 100000"
                 />
                 <SingleFieldCard
                   label="Extra Monthly Income"
                   helper="Freelancing, rent, side income, etc."
                   value={state.extraIncome}
-                  onChange={(value) => updateField('extraIncome', value)}
+                  onBlurPersist={(value) => updateField('extraIncome', value)}
                   placeholder="e.g. 15000"
                 />
               </div>
@@ -2800,11 +3123,11 @@ function App() {
                 items={state.dailySpends}
                 total={totals.spends}
                 categories={state.spendCategories}
-                onAddItem={(item) => addItem('dailySpends', item)}
-                onUpdateItem={(index, item) => updateItem('dailySpends', index, item)}
-                onDeleteItem={(index) => deleteItem('dailySpends', index)}
-                onAddCategory={addSpendCategory}
-                onDeleteCategory={deleteSpendCategory}
+                onAddItem={(item) => addItemAndPersist('dailySpends', item)}
+                onUpdateItem={(index, item) => updateItemAndPersist('dailySpends', index, item)}
+                onDeleteItem={(index) => deleteItemAndPersist('dailySpends', index)}
+                onAddCategory={addSpendCategoryAndPersist}
+                onDeleteCategory={deleteSpendCategoryAndPersist}
               />
             }
           />
@@ -2813,8 +3136,8 @@ function App() {
             element={
               <SpendCategoriesPage
                 categories={state.spendCategories}
-                onAdd={addSpendCategory}
-                onDelete={deleteSpendCategory}
+                onAdd={addSpendCategoryAndPersist}
+                onDelete={deleteSpendCategoryAndPersist}
               />
             }
           />
@@ -2826,9 +3149,9 @@ function App() {
                   title="Credit Cards Pending"
                   helper="Outstanding dues per card."
                   items={state.creditCards}
-                  onAdd={(item) => addItem('creditCards', item)}
-                  onUpdate={(index, item) => updateItem('creditCards', index, item)}
-                  onDelete={(index) => deleteItem('creditCards', index)}
+                  onAdd={(item) => addItemAndPersist('creditCards', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('creditCards', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('creditCards', index)}
                   total={totals.creditDue}
                   fields={[
                     { key: 'name', placeholder: 'Card name' },
@@ -2848,9 +3171,9 @@ function App() {
                   title="Active EMIs"
                   helper="Your monthly EMI obligations."
                   items={state.emis}
-                  onAdd={(item) => addItem('emis', item)}
-                  onUpdate={(index, item) => updateItem('emis', index, item)}
-                  onDelete={(index) => deleteItem('emis', index)}
+                  onAdd={(item) => addItemAndPersist('emis', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('emis', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('emis', index)}
                   total={totals.emiDue}
                   fields={[
                     { key: 'name', placeholder: 'EMI name' },
@@ -2870,9 +3193,9 @@ function App() {
                   title="Loans"
                   helper="EMI and outstanding are auto-calculated."
                   items={state.loans}
-                  onAdd={(item) => addItem('loans', item)}
-                  onUpdate={(index, item) => updateItem('loans', index, item)}
-                  onDelete={(index) => deleteItem('loans', index)}
+                  onAdd={(item) => addItemAndPersist('loans', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('loans', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('loans', index)}
                   total={totals.loansDue}
                   fields={[
                     { key: 'name', placeholder: 'Loan name' },
@@ -2894,9 +3217,9 @@ function App() {
                   title="Assets"
                   helper="Land, gold, cash, or any owned asset."
                   items={state.assets}
-                  onAdd={(item) => addItem('assets', item)}
-                  onUpdate={(index, item) => updateItem('assets', index, item)}
-                  onDelete={(index) => deleteItem('assets', index)}
+                  onAdd={(item) => addItemAndPersist('assets', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('assets', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('assets', index)}
                   total={totals.liquidAssets}
                   fields={[
                     { key: 'name', placeholder: 'Asset name' },
@@ -2921,9 +3244,9 @@ function App() {
                   title="Mutual Funds"
                   helper="Auto-calculates current value and gain/loss from units and NAV."
                   items={state.mutualFunds}
-                  onAdd={(item) => addItem('mutualFunds', item)}
-                  onUpdate={(index, item) => updateItem('mutualFunds', index, item)}
-                  onDelete={(index) => deleteItem('mutualFunds', index)}
+                  onAdd={(item) => addItemAndPersist('mutualFunds', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('mutualFunds', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('mutualFunds', index)}
                   total={getTotal(state.mutualFunds)}
                   fields={[
                     { key: 'name', placeholder: 'Fund name' },
@@ -2952,9 +3275,9 @@ function App() {
                   title="Stocks"
                   helper="Auto-calculates current value and gain/loss from qty and prices."
                   items={state.stocks}
-                  onAdd={(item) => addItem('stocks', item)}
-                  onUpdate={(index, item) => updateItem('stocks', index, item)}
-                  onDelete={(index) => deleteItem('stocks', index)}
+                  onAdd={(item) => addItemAndPersist('stocks', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('stocks', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('stocks', index)}
                   total={getTotal(state.stocks)}
                   fields={[
                     { key: 'name', placeholder: 'Stock name' },
@@ -2983,9 +3306,9 @@ function App() {
                   title="Fixed Deposits (FD)"
                   helper="Maturity date/value are auto-calculated."
                   items={state.fds}
-                  onAdd={(item) => addItem('fds', item)}
-                  onUpdate={(index, item) => updateItem('fds', index, item)}
-                  onDelete={(index) => deleteItem('fds', index)}
+                  onAdd={(item) => addItemAndPersist('fds', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('fds', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('fds', index)}
                   total={totals.fdValueUsed}
                   fields={[
                     { key: 'name', placeholder: 'FD name' },
@@ -3012,9 +3335,9 @@ function App() {
                   title="Recurring Deposits (RD)"
                   helper="List total is current accrued value; maturity date and full maturity amount are in each row note."
                   items={state.rds}
-                  onAdd={(item) => addItem('rds', item)}
-                  onUpdate={(index, item) => updateItem('rds', index, item)}
-                  onDelete={(index) => deleteItem('rds', index)}
+                  onAdd={(item) => addItemAndPersist('rds', item)}
+                  onUpdate={(index, item) => updateItemAndPersist('rds', index, item)}
+                  onDelete={(index) => deleteItemAndPersist('rds', index)}
                   total={getTotal(state.rds)}
                   fields={[
                     { key: 'name', placeholder: 'RD name' },
