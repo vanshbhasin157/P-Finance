@@ -656,6 +656,28 @@ header p {
   overflow-y: auto;
 }
 
+.modal-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.modal-field-label-text {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.88;
+  margin: 0;
+}
+
+.modal-field-label input,
+.modal-field-label select {
+  margin-top: 0;
+}
+
 .modal-entry-grid input,
 .modal-entry-grid select {
   margin-top: 0;

@@ -371,6 +371,21 @@ function listItemDetailsCell(item) {
   return line || '—'
 }
 
+/** Newest first: explicit createdAt, else calendar date fields, else array order (higher index = newer). */
+function listItemSortTimeMs(item) {
+  if (item.createdAt) {
+    const t = Date.parse(String(item.createdAt))
+    if (!Number.isNaN(t)) return t
+  }
+  const iso =
+    item.date || item.purchaseDate || item.startDate || item.maturityDate || ''
+  if (typeof iso === 'string' && iso.length >= 10) {
+    const t = Date.parse(`${iso.slice(0, 10)}T12:00:00`)
+    if (!Number.isNaN(t)) return t
+  }
+  return 0
+}
+
 function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, helper, pageSize = 10 }) {
   const [entry, setEntry] = useState(
     Object.fromEntries(fields.map((field) => [field.key, ''])),
@@ -422,6 +437,11 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
 
   const filteredItems = items
     .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((a, b) => {
+      const diff = listItemSortTimeMs(b.item) - listItemSortTimeMs(a.item)
+      if (diff !== 0) return diff
+      return b.originalIndex - a.originalIndex
+    })
     .filter(({ item }) => {
       const q = query.trim().toLowerCase()
       const haystack = collectSearchText(item).toLowerCase()
@@ -713,38 +733,51 @@ function ListCard({ title, items, onAdd, onDelete, onUpdate, fields, total, help
             </div>
             <div className="modal-body">
               <div className="entry-grid modal-entry-grid">
-                {fields.map((field) =>
-                  field.type === 'select' ? (
-                    <select
-                      key={field.key}
-                      value={entry[field.key] ?? ''}
-                      onChange={(event) => updateEntry(field.key, event.target.value)}
-                    >
-                      <option value="">{field.placeholder}</option>
-                      {field.options?.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
+                {fields.map((field) => {
+                  const label = field.label || field.placeholder || field.key
+                  const fieldId = `list-modal-${title.replace(/\s+/g, '-')}-${field.key}`
+                  return field.type === 'select' ? (
+                    <div key={field.key} className="modal-field-label">
+                      <label className="modal-field-label-text" htmlFor={fieldId}>
+                        {label}
+                      </label>
+                      <select
+                        id={fieldId}
+                        value={entry[field.key] ?? ''}
+                        onChange={(event) => updateEntry(field.key, event.target.value)}
+                      >
+                        <option value="">Choose…</option>
+                        {field.options?.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   ) : (
-                    <input
-                      key={field.key}
-                      type={field.type ?? 'text'}
-                      min={field.type === 'number' ? '0' : undefined}
-                      placeholder={field.placeholder}
-                      value={field.type === 'file' ? undefined : (entry[field.key] ?? '')}
-                      onChange={(event) =>
-                        updateEntry(
-                          field.key,
-                          field.type === 'file'
-                            ? event.target.files?.[0]?.name ?? ''
-                            : event.target.value,
-                        )
-                      }
-                    />
-                  ),
-                )}
+                    <div key={field.key} className="modal-field-label">
+                      <label className="modal-field-label-text" htmlFor={fieldId}>
+                        {label}
+                      </label>
+                      <input
+                        id={fieldId}
+                        type={field.type ?? 'text'}
+                        min={field.type === 'number' ? '0' : undefined}
+                        placeholder={field.placeholder}
+                        autoComplete="off"
+                        value={field.type === 'file' ? undefined : (entry[field.key] ?? '')}
+                        onChange={(event) =>
+                          updateEntry(
+                            field.key,
+                            field.type === 'file'
+                              ? event.target.files?.[0]?.name ?? ''
+                              : event.target.value,
+                          )
+                        }
+                      />
+                    </div>
+                  )
+                })}
               </div>
             </div>
             <div className="modal-footer">
@@ -1800,6 +1833,13 @@ function App() {
   const [cloudError, setCloudError] = useState(null)
   const [cloudSync, setCloudSync] = useState('idle')
 
+  const stateRef = useRef(state)
+  const remoteHydratedRef = useRef(remoteHydrated)
+  const authUserIdRef = useRef(null)
+  stateRef.current = state
+  remoteHydratedRef.current = remoteHydrated
+  authUserIdRef.current = authUser?.id ?? null
+
   function clearSupabaseLocalSessionKeys() {
     if (typeof window === 'undefined') return
     const keys = Object.keys(window.localStorage)
@@ -1897,9 +1937,39 @@ function App() {
           setCloudSync('error')
           setCloudError(e?.message || 'Cloud save failed')
         })
-    }, 1000)
+    }, 450)
     return () => clearTimeout(timer)
   }, [state, authUser?.id, remoteHydrated])
+
+  // Mobile: tab backgrounding often cancels the debounced save; flush before the page is hidden.
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return
+
+    function flushCloudFromRef() {
+      const uid = authUserIdRef.current
+      if (!uid || !remoteHydratedRef.current) return
+      void upsertFinanceData(uid, stateRef.current)
+        .then(() => {
+          setCloudSync('saved')
+          setCloudError(null)
+        })
+        .catch((e) => {
+          setCloudSync('error')
+          setCloudError(e?.message || 'Cloud save failed')
+        })
+    }
+
+    function onVisibility() {
+      if (document.visibilityState === 'hidden') flushCloudFromRef()
+    }
+
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', flushCloudFromRef)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', flushCloudFromRef)
+    }
+  }, [])
 
   useEffect(() => {
     setMobileNavOpen(false)
@@ -1983,12 +2053,14 @@ function App() {
   }
 
   function addItem(key, item) {
+    const createdAt = new Date().toISOString()
     setState((prev) => {
-      const normalized = normalizeItem(key, item)
+      const normalized = normalizeItem(key, { ...item, createdAt })
+      const withMeta = { ...normalized, createdAt: normalized.createdAt || createdAt }
 
       const next = {
         ...prev,
-        [key]: [...prev[key], normalized],
+        [key]: [...prev[key], withMeta],
       }
       return next
     })
@@ -2007,7 +2079,11 @@ function App() {
   function updateItem(key, index, item) {
     setState((prev) => {
       const nextItems = [...prev[key]]
-      nextItems[index] = normalizeItem(key, item)
+      const prevRow = nextItems[index] || {}
+      nextItems[index] = normalizeItem(key, {
+        ...item,
+        createdAt: prevRow.createdAt || item.createdAt || new Date().toISOString(),
+      })
       const next = { ...prev, [key]: nextItems }
       return next
     })
