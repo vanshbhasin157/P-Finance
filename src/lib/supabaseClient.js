@@ -37,15 +37,46 @@ export const supabase = isSupabaseConfigured()
   : null
 
 /** Single-flight: React Strict Mode runs effects twice; avoid duplicate setSession / hash clear races. */
-let magicLinkFromHashPromise = null
+let authRedirectConsumePromise = null
+
+function stripAuthFromUrl() {
+  const url = new URL(window.location.href)
+  url.hash = ''
+  ;['code', 'error', 'error_code', 'error_description', 'state'].forEach((k) => url.searchParams.delete(k))
+  window.history.replaceState({}, document.title, `${url.pathname}${url.search}`)
+}
 
 /**
- * If the URL hash contains Supabase implicit flow tokens (email magic link), exchange them for a session.
- * Clears the hash on success. Safe to call multiple times (deduped).
+ * Apply Supabase email / OAuth redirect: PKCE `?code=`, implicit `#access_token=`, or hash errors.
+ * Clears auth params on success. Safe to call multiple times (deduped).
  */
 export function consumeAuthHashFromUrl() {
   if (!supabase || typeof window === 'undefined') {
     return Promise.resolve({ ok: false, reason: 'no-client' })
+  }
+
+  const url = new URL(window.location.href)
+  const code = url.searchParams.get('code')
+
+  if (code) {
+    if (!authRedirectConsumePromise) {
+      authRedirectConsumePromise = supabase.auth
+        .exchangeCodeForSession(code)
+        .then(({ data, error }) => {
+          if (error) {
+            return { ok: false, reason: 'exchange-code', error }
+          }
+          if (!data?.session) {
+            return { ok: false, reason: 'no-session', error: new Error('No session returned') }
+          }
+          stripAuthFromUrl()
+          return { ok: true, session: data.session }
+        })
+        .finally(() => {
+          authRedirectConsumePromise = null
+        })
+    }
+    return authRedirectConsumePromise
   }
 
   const raw = window.location.hash.startsWith('#')
@@ -70,11 +101,7 @@ export function consumeAuthHashFromUrl() {
         msg = errDesc
       }
     }
-    window.history.replaceState(
-      {},
-      document.title,
-      `${window.location.pathname}${window.location.search}`,
-    )
+    stripAuthFromUrl()
     return Promise.resolve({ ok: false, reason: 'hash-error', message: msg })
   }
 
@@ -82,8 +109,8 @@ export function consumeAuthHashFromUrl() {
     return Promise.resolve({ ok: false, reason: 'no-tokens' })
   }
 
-  if (!magicLinkFromHashPromise) {
-    magicLinkFromHashPromise = supabase.auth
+  if (!authRedirectConsumePromise) {
+    authRedirectConsumePromise = supabase.auth
       .setSession({
         access_token: accessToken,
         refresh_token: refreshToken,
@@ -95,17 +122,13 @@ export function consumeAuthHashFromUrl() {
         if (!data?.session) {
           return { ok: false, reason: 'no-session', error: new Error('No session returned') }
         }
-        window.history.replaceState(
-          {},
-          document.title,
-          `${window.location.pathname}${window.location.search}`,
-        )
+        stripAuthFromUrl()
         return { ok: true, session: data.session }
       })
       .finally(() => {
-        magicLinkFromHashPromise = null
+        authRedirectConsumePromise = null
       })
   }
 
-  return magicLinkFromHashPromise
+  return authRedirectConsumePromise
 }

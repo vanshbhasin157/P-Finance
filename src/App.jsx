@@ -1759,6 +1759,12 @@ function DashboardPage({
   )
 }
 
+/** Keep email magic-link tokens in the URL until App can call consumeAuthHashFromUrl (Navigate to="/home" used to drop the hash). */
+function RootToHome() {
+  const { hash, search } = useLocation()
+  return <Navigate to={{ pathname: '/home', search, hash }} replace />
+}
+
 function App() {
   const location = useLocation()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -2596,7 +2602,7 @@ function App() {
 
         <section className="page">
           <Routes>
-          <Route path="/" element={<Navigate to="/home" replace />} />
+          <Route path="/" element={<RootToHome />} />
           <Route
             path="/home"
             element={
