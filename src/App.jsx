@@ -11,6 +11,20 @@ const moneyFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 0,
 })
 
+/**
+ * Cloud/sync trace logs (filter console by `[finance-dash]`).
+ * Silence: localStorage.setItem('finance-dash-sync-log', '0')
+ * Force on: localStorage.removeItem('finance-dash-sync-log') or set to '1'
+ */
+function syncLog(phase, detail) {
+  if (typeof window !== 'undefined' && window.localStorage?.getItem('finance-dash-sync-log') === '0') return
+  if (detail !== undefined && detail !== null && typeof detail === 'object' && !Array.isArray(detail)) {
+    console.log(`[finance-dash] ${phase}`, { ...detail })
+  } else {
+    console.log(`[finance-dash] ${phase}`, detail ?? '')
+  }
+}
+
 const ASSET_CLASSES = ['Equity', 'Debt', 'Cash', 'Gold', 'Others']
 
 const initialState = {
@@ -456,6 +470,17 @@ function ListCard({
     const hasAmountField = fields.some((field) => field.key === 'amount')
     if ('name' in entry && !String(entry.name).trim()) return
     if (hasAmountField && (!entry.amount || parseAmount(entry.amount) <= 0)) return
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    syncLog('listSubmit:start', {
+      runId,
+      title,
+      mode: editingIndex !== null ? 'edit' : 'add',
+      editingIndex,
+      units: entry.units,
+      unitsType: typeof entry.units,
+      avgPrice: entry.avgPrice,
+      currentPrice: entry.currentPrice,
+    })
     setSubmitSyncing(true)
     try {
       if (editingIndex !== null && onUpdate) {
@@ -463,11 +488,20 @@ function ListCard({
       } else {
         await Promise.resolve(onAdd(entry))
       }
+      syncLog('listSubmit:success', { runId, title })
       resetEntry()
       setDialogOpen(false)
-    } catch {
+    } catch (err) {
+      syncLog('listSubmit:error', {
+        runId,
+        title,
+        message: err?.message,
+        name: err?.name,
+        stack: err?.stack,
+      })
       /* cloudError shown in app header */
     } finally {
+      syncLog('listSubmit:finally', { runId, title })
       setSubmitSyncing(false)
     }
   }
@@ -1992,33 +2026,64 @@ function App() {
   authUserIdRef.current = authUser?.id ?? null
 
   const syncStateToCloud = useCallback(async (snapshot, options = {}) => {
+    const cid = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     const force = Boolean(options.force)
-    if (!isSupabaseConfigured() || !supabase) return
-    if (!force && !remoteHydratedRef.current) return
+    syncLog('syncToCloud:enter', {
+      cid,
+      force,
+      remoteHydrated: remoteHydratedRef.current,
+      supabaseConfigured: isSupabaseConfigured(),
+      uidFromRef: authUserIdRef.current ? `${String(authUserIdRef.current).slice(0, 8)}…` : null,
+      mfCount: snapshot?.mutualFunds?.length,
+      snapshotJsonLen: (() => {
+        try {
+          return JSON.stringify(snapshot).length
+        } catch (e) {
+          return `stringify-error:${e?.message}`
+        }
+      })(),
+    })
+    if (!isSupabaseConfigured() || !supabase) {
+      syncLog('syncToCloud:skip', { cid, reason: 'no-supabase' })
+      return
+    }
+    if (!force && !remoteHydratedRef.current) {
+      syncLog('syncToCloud:skip', { cid, reason: 'not-hydrated' })
+      return
+    }
 
     let uid = authUserIdRef.current
     if (!uid) {
+      syncLog('syncToCloud:getSession', { cid })
       try {
         const {
           data: { session },
         } = await withTimeout(supabase.auth.getSession(), 15_000, 'Sign-in check')
         uid = session?.user?.id ?? null
+        syncLog('syncToCloud:getSession:ok', { cid, hasUid: Boolean(uid) })
       } catch (e) {
         const msg = e?.message || 'Could not verify sign-in'
+        syncLog('syncToCloud:getSession:fail', { cid, message: msg })
         setCloudSync('error')
         setCloudError(msg)
         throw new Error(msg)
       }
     }
-    if (!uid) return
+    if (!uid) {
+      syncLog('syncToCloud:skip', { cid, reason: 'no-uid' })
+      return
+    }
 
     setCloudSync('syncing')
+    syncLog('syncToCloud:upsert:start', { cid, uidPrefix: String(uid).slice(0, 8) })
     try {
       await upsertFinanceData(uid, snapshot)
+      syncLog('syncToCloud:upsert:ok', { cid })
       setCloudSync('saved')
       setCloudError(null)
     } catch (e) {
       const msg = e?.message || 'Cloud save failed'
+      syncLog('syncToCloud:upsert:fail', { cid, message: msg, name: e?.name, stack: e?.stack })
       setCloudSync('error')
       setCloudError(msg)
       throw new Error(msg)
@@ -2027,14 +2092,32 @@ function App() {
 
   const runPersist = useCallback(
     async (mutator) => {
+      const rid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      syncLog('runPersist:start', { rid })
       let snap
-      flushSync(() => {
-        setState((prev) => {
-          snap = mutator(prev)
-          return snap
+      try {
+        flushSync(() => {
+          setState((prev) => {
+            snap = mutator(prev)
+            return snap
+          })
         })
+      } catch (e) {
+        syncLog('runPersist:flushError', { rid, message: e?.message, stack: e?.stack })
+        throw e
+      }
+      syncLog('runPersist:flushed', {
+        rid,
+        mutualFundsCount: snap?.mutualFunds?.length,
+        mfUnitsSample: snap?.mutualFunds?.slice(0, 8).map((m, i) => ({ i, units: m?.units })),
       })
-      await syncStateToCloud(snap, { force: true })
+      try {
+        await syncStateToCloud(snap, { force: true })
+        syncLog('runPersist:cloudDone', { rid })
+      } catch (e) {
+        syncLog('runPersist:cloudRejected', { rid, message: e?.message })
+        throw e
+      }
     },
     [syncStateToCloud],
   )
@@ -2197,31 +2280,48 @@ function App() {
     }
 
     if (key === 'mutualFunds' || key === 'stocks') {
-      const qtyStr = (v) =>
-        v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : ''
-      const unitsStr = qtyStr(item.units)
-      const avgStr = qtyStr(item.avgPrice)
-      const curStr = qtyStr(item.currentPrice)
-      const metrics = calculateHoldingMetrics(unitsStr, avgStr, curStr)
-      const userOnly = extractUserNoteFromHoldingStoredNote(item.note)
-      const userSuffix =
-        userOnly !== '' ? `${HOLDING_USER_NOTE_MARKER}${userOnly}` : ''
-      const yearsHeld = yearsBetween(item.purchaseDate)
-      const cagr = calculateCagr(metrics.invested, metrics.currentValue, yearsHeld)
-      const cagrPart =
-        cagr !== null && Number.isFinite(cagr) ? ` | CAGR ${(cagr * 100).toFixed(2)}%` : ''
-      const realized = parseAmount(item.realizedGain)
-      const realizedPart = realized !== 0 ? ` | Realized P/L ${moneyFormatter.format(realized)}` : ''
-      normalized = {
-        ...item,
-        assetClass: item.assetClass || (key === 'stocks' ? 'Equity' : 'Equity'),
-        units: unitsStr,
-        avgPrice: avgStr,
-        currentPrice: curStr,
-        amount: String(metrics.currentValue),
-        invested: String(metrics.invested),
-        gainLoss: String(metrics.gainLoss),
-        note: `Invested ${moneyFormatter.format(metrics.invested)} | Unrealized ${moneyFormatter.format(metrics.gainLoss)}${cagrPart}${realizedPart}${userSuffix}`,
+      try {
+        const qtyStr = (v) =>
+          v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : ''
+        const unitsStr = qtyStr(item.units)
+        const avgStr = qtyStr(item.avgPrice)
+        const curStr = qtyStr(item.currentPrice)
+        syncLog('normalizeItem:mfStock', {
+          key,
+          rawUnits: item.units,
+          unitsStr,
+          avgStr,
+          curStr,
+        })
+        const metrics = calculateHoldingMetrics(unitsStr, avgStr, curStr)
+        const userOnly = extractUserNoteFromHoldingStoredNote(item.note)
+        const userSuffix =
+          userOnly !== '' ? `${HOLDING_USER_NOTE_MARKER}${userOnly}` : ''
+        const yearsHeld = yearsBetween(item.purchaseDate)
+        const cagr = calculateCagr(metrics.invested, metrics.currentValue, yearsHeld)
+        const cagrPart =
+          cagr !== null && Number.isFinite(cagr) ? ` | CAGR ${(cagr * 100).toFixed(2)}%` : ''
+        const realized = parseAmount(item.realizedGain)
+        const realizedPart = realized !== 0 ? ` | Realized P/L ${moneyFormatter.format(realized)}` : ''
+        normalized = {
+          ...item,
+          assetClass: item.assetClass || (key === 'stocks' ? 'Equity' : 'Equity'),
+          units: unitsStr,
+          avgPrice: avgStr,
+          currentPrice: curStr,
+          amount: String(metrics.currentValue),
+          invested: String(metrics.invested),
+          gainLoss: String(metrics.gainLoss),
+          note: `Invested ${moneyFormatter.format(metrics.invested)} | Unrealized ${moneyFormatter.format(metrics.gainLoss)}${cagrPart}${realizedPart}${userSuffix}`,
+        }
+      } catch (e) {
+        syncLog('normalizeItem:mfStockError', {
+          key,
+          message: e?.message,
+          stack: e?.stack,
+          rawUnits: item?.units,
+        })
+        throw e
       }
     }
 
@@ -2260,13 +2360,26 @@ function App() {
   }
 
   async function updateItemAndPersist(key, index, item) {
+    syncLog('updateItemAndPersist:start', {
+      key,
+      index,
+      units: item?.units,
+      unitsType: typeof item?.units,
+    })
     await runPersist((prev) => {
       const nextItems = [...prev[key]]
       const prevRow = nextItems[index] || {}
-      nextItems[index] = normalizeItem(key, {
+      const normalized = normalizeItem(key, {
         ...item,
         createdAt: prevRow.createdAt || item.createdAt || new Date().toISOString(),
       })
+      syncLog('updateItemAndPersist:normalized', {
+        key,
+        index,
+        units: normalized.units,
+        invested: normalized.invested,
+      })
+      nextItems[index] = normalized
       return { ...prev, [key]: nextItems }
     })
   }
