@@ -1832,7 +1832,47 @@ function App() {
       }
     }
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    async function bootstrapSession() {
+      // Support email magic-link redirects even with detectSessionInUrl disabled.
+      const hash = typeof window !== 'undefined' ? window.location.hash || '' : ''
+      const hashParams = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash)
+      const accessToken = hashParams.get('access_token')
+      const refreshToken = hashParams.get('refresh_token')
+      const hashErrorCode = hashParams.get('error_code')
+      const hashErrorDescription = hashParams.get('error_description')
+
+      if (accessToken && refreshToken) {
+        try {
+          const { error } = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          })
+          if (error) {
+            setCloudError(formatAuthCloudError(error))
+          } else if (typeof window !== 'undefined') {
+            // Remove sensitive auth tokens and keep app routes clean.
+            window.history.replaceState(
+              {},
+              document.title,
+              `${window.location.pathname}${window.location.search}`,
+            )
+          }
+        } catch (e) {
+          setCloudError(formatAuthCloudError(e))
+        }
+      } else if (hashErrorCode || hashErrorDescription) {
+        const msg = decodeURIComponent(hashErrorDescription || hashErrorCode || '')
+        setCloudError(formatAuthCloudError(msg || 'Email link is invalid or expired. Please request a new OTP.'))
+        if (typeof window !== 'undefined') {
+          window.history.replaceState(
+            {},
+            document.title,
+            `${window.location.pathname}${window.location.search}`,
+          )
+        }
+      }
+
+      const { data: { session } } = await supabase.auth.getSession()
       setAuthUser(session?.user ?? null)
       if (session?.user) {
         hydrateFromCloud(session.user.id)
@@ -1840,6 +1880,12 @@ function App() {
         setRemoteHydrated(true)
         setAuthReady(true)
       }
+    }
+
+    bootstrapSession().catch((e) => {
+      setCloudError(formatAuthCloudError(e))
+      setRemoteHydrated(true)
+      setAuthReady(true)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
