@@ -1258,13 +1258,16 @@ function SettingsPage({
               Your <strong>app PIN</strong> below still only locks this device UI.
             </p>
             <p className="helper">
-              Supabase may email a magic link and/or a one-time code. Prefer entering the code here.
-              Magic links use this site’s address (e.g. Vite <code>http://localhost:5173</code>); in the
-              Supabase dashboard open <strong>Authentication → URL Configuration</strong> and set{' '}
-              <strong>Site URL</strong> to match, and add the same origin under{' '}
-              <strong>Redirect URLs</strong> (e.g. <code>http://localhost:5173/**</code>). If links pointed
-              at <code>localhost:3000</code>, update those settings or set{' '}
-              <code>VITE_SUPABASE_REDIRECT_URL</code> in <code>.env.local</code>.
+              The default Supabase email only shows a <strong>magic link</strong> until you edit the template:
+              Dashboard → <strong>Authentication → Email Templates</strong> → <strong>Magic link</strong>, and
+              add a line like <code>Your code: {'{{ .Token }}'}</code> (6-digit OTP). Same variable is
+              documented in{' '}
+              <a href="https://supabase.com/docs/guides/auth/auth-email-templates" target="_blank" rel="noreferrer">
+                Email templates
+              </a>
+              . Then use <strong>Verify OTP</strong> below with that code. Magic links still need{' '}
+              <strong>Authentication → URL Configuration</strong> (Site URL + Redirect URLs, or{' '}
+              <code>VITE_SUPABASE_REDIRECT_URL</code> in <code>.env.local</code>).
             </p>
             <div>
               <div className="inline-form">
