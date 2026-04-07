@@ -489,15 +489,12 @@ function ListCard({
       currentPrice: entry.currentPrice,
     })
     setSubmitSyncing(true)
+    let submitTask
     try {
-      if (editingIndex !== null && onUpdate) {
-        await Promise.resolve(onUpdate(editingIndex, entry))
-      } else {
-        await Promise.resolve(onAdd(entry))
-      }
-      syncLog('listSubmit:success', { runId, title })
-      resetEntry()
-      setDialogOpen(false)
+      submitTask =
+        editingIndex !== null && onUpdate
+          ? Promise.resolve(onUpdate(editingIndex, entry))
+          : Promise.resolve(onAdd(entry))
     } catch (err) {
       syncLog('listSubmit:error', {
         runId,
@@ -506,11 +503,31 @@ function ListCard({
         name: err?.name,
         stack: err?.stack,
       })
-      /* cloudError shown in app header */
-    } finally {
-      syncLog('listSubmit:finally', { runId, title })
       setSubmitSyncing(false)
+      return
     }
+
+    // Close immediately after local state update; cloud sync continues in background.
+    resetEntry()
+    setDialogOpen(false)
+    setSubmitSyncing(false)
+
+    void submitTask
+      .then(() => {
+        syncLog('listSubmit:success', { runId, title })
+      })
+      .catch((err) => {
+        syncLog('listSubmit:error', {
+          runId,
+          title,
+          message: err?.message,
+          name: err?.name,
+          stack: err?.stack,
+        })
+      })
+      .finally(() => {
+        syncLog('listSubmit:finally', { runId, title })
+      })
   }
 
   function openAddDialog() {
