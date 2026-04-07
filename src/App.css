@@ -720,6 +720,11 @@ header p {
   margin-top: 0;
 }
 
+/* text + inputMode=decimal — avoids mobile bugs with type=number and 3+ fractional digits (NAV/units) */
+.list-modal-decimal {
+  font-variant-numeric: tabular-nums;
+}
+
 .modal-footer {
   display: flex;
   flex-wrap: wrap;

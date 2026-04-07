@@ -6,6 +6,37 @@ const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 export const isSupabaseConfigured = () =>
   Boolean(url && anonKey && url.startsWith('http'))
 
+/** Hard cap so a stalled TCP connection does not hang forever (esp. mobile). */
+const SUPABASE_FETCH_BUDGET_MS = 95_000
+
+const nativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : fetch
+
+function fetchWithBudgetTimeout(reqUrl, options = {}) {
+  const timer = new AbortController()
+  const tid = setTimeout(() => timer.abort(), SUPABASE_FETCH_BUDGET_MS)
+  const incoming = options.signal
+  let signal = timer.signal
+  if (incoming) {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+      signal = AbortSignal.any([incoming, timer.signal])
+    } else {
+      if (incoming.aborted) {
+        clearTimeout(tid)
+        return Promise.reject(incoming.reason ?? new Error('Aborted'))
+      }
+      incoming.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(tid)
+          timer.abort()
+        },
+        { once: true },
+      )
+    }
+  }
+  return nativeFetch(reqUrl, { ...options, signal }).finally(() => clearTimeout(tid))
+}
+
 /**
  * Serialize all Supabase Auth storage operations in this tab.
  * Avoids Navigator Lock API races ("another request stole it") from concurrent
@@ -26,6 +57,9 @@ function createSerializedAuthLock() {
 
 export const supabase = isSupabaseConfigured()
   ? createClient(url, anonKey, {
+      global: {
+        fetch: fetchWithBudgetTimeout,
+      },
       auth: {
         persistSession: true,
         autoRefreshToken: true,

@@ -93,6 +93,13 @@ function toNumber(value) {
   return num
 }
 
+/** Stored rupee amounts as strings; avoid JS float tails (e.g. 173712.71128000002) in JSON payloads. */
+function finiteMoneyStr(n) {
+  const x = Number(n)
+  if (!Number.isFinite(x)) return '0'
+  return x.toFixed(2)
+}
+
 function calculateLoanEmi(principal, annualRatePercent, tenureMonths) {
   const p = Math.max(0, toNumber(principal))
   const months = Math.max(0, toNumber(tenureMonths))
@@ -520,7 +527,7 @@ function ListCard({
     const next = { ...raw }
     for (const f of fields) {
       const v = raw[f.key]
-      if (f.type === 'number') {
+      if (f.type === 'number' || f.type === 'decimal') {
         next[f.key] = v === undefined || v === null || v === '' ? '' : String(v)
       } else if (f.type === 'select') {
         next[f.key] = v === undefined || v === null ? '' : String(v)
@@ -875,6 +882,8 @@ function ListCard({
                 {fields.map((field) => {
                   const label = field.label || field.placeholder || field.key
                   const fieldId = `list-modal-${title.replace(/\s+/g, '-')}-${field.key}`
+                  const useDecimalText = field.type === 'decimal'
+                  const useNumberSpin = field.type === 'number'
                   return field.type === 'select' ? (
                     <div key={field.key} className="modal-field-label">
                       <label className="modal-field-label-text" htmlFor={fieldId}>
@@ -896,10 +905,11 @@ function ListCard({
                       </label>
                       <input
                         id={fieldId}
-                        type={field.type ?? 'text'}
-                        min={field.type === 'number' ? '0' : undefined}
-                        step={field.type === 'number' ? 'any' : undefined}
-                        inputMode={field.type === 'number' ? 'decimal' : undefined}
+                        type={useDecimalText ? 'text' : (field.type ?? 'text')}
+                        className={useDecimalText ? 'list-modal-decimal' : undefined}
+                        min={useNumberSpin ? '0' : undefined}
+                        step={useNumberSpin ? 'any' : undefined}
+                        inputMode={useNumberSpin || useDecimalText ? 'decimal' : undefined}
                         placeholder={field.placeholder}
                         autoComplete="off"
                         value={field.type === 'file' ? undefined : (entry[field.key] ?? '')}
@@ -2281,8 +2291,13 @@ function App() {
 
     if (key === 'mutualFunds' || key === 'stocks') {
       try {
-        const qtyStr = (v) =>
-          v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : ''
+        const qtyStr = (v) => {
+          if (v === undefined || v === null) return ''
+          let s = String(v).trim()
+          if (s === '') return ''
+          if (/^\d+,\d+$/.test(s)) return s.replace(',', '.')
+          return s.replace(/,/g, '')
+        }
         const unitsStr = qtyStr(item.units)
         const avgStr = qtyStr(item.avgPrice)
         const curStr = qtyStr(item.currentPrice)
@@ -2309,9 +2324,9 @@ function App() {
           units: unitsStr,
           avgPrice: avgStr,
           currentPrice: curStr,
-          amount: String(metrics.currentValue),
-          invested: String(metrics.invested),
-          gainLoss: String(metrics.gainLoss),
+          amount: finiteMoneyStr(metrics.currentValue),
+          invested: finiteMoneyStr(metrics.invested),
+          gainLoss: finiteMoneyStr(metrics.gainLoss),
           note: `Invested ${moneyFormatter.format(metrics.invested)} | Unrealized ${moneyFormatter.format(metrics.gainLoss)}${cagrPart}${realizedPart}${userSuffix}`,
         }
       } catch (e) {
@@ -3153,11 +3168,11 @@ function App() {
                         placeholder: 'Asset class',
                         options: ASSET_CLASSES,
                       },
-                      { key: 'units', type: 'number', placeholder: 'Units' },
-                      { key: 'avgPrice', type: 'number', placeholder: 'Avg NAV' },
-                      { key: 'currentPrice', type: 'number', placeholder: 'Current NAV' },
+                      { key: 'units', type: 'decimal', placeholder: 'Units' },
+                      { key: 'avgPrice', type: 'decimal', placeholder: 'Avg NAV' },
+                      { key: 'currentPrice', type: 'decimal', placeholder: 'Current NAV' },
                       { key: 'purchaseDate', type: 'date', placeholder: 'Purchase date (CAGR)' },
-                      { key: 'realizedGain', type: 'number', placeholder: 'Realized P/L' },
+                      { key: 'realizedGain', type: 'decimal', placeholder: 'Realized P/L' },
                       { key: 'note', placeholder: 'Folio / Notes (optional)' },
                     ]}
                   />
@@ -3189,11 +3204,11 @@ function App() {
                         placeholder: 'Asset class',
                         options: ASSET_CLASSES,
                       },
-                      { key: 'units', type: 'number', placeholder: 'Qty' },
-                      { key: 'avgPrice', type: 'number', placeholder: 'Avg buy price' },
-                      { key: 'currentPrice', type: 'number', placeholder: 'Current price' },
+                      { key: 'units', type: 'decimal', placeholder: 'Qty' },
+                      { key: 'avgPrice', type: 'decimal', placeholder: 'Avg buy price' },
+                      { key: 'currentPrice', type: 'decimal', placeholder: 'Current price' },
                       { key: 'purchaseDate', type: 'date', placeholder: 'Purchase date (CAGR)' },
-                      { key: 'realizedGain', type: 'number', placeholder: 'Realized P/L' },
+                      { key: 'realizedGain', type: 'decimal', placeholder: 'Realized P/L' },
                       { key: 'note', placeholder: 'Broker / Notes (optional)' },
                     ]}
                   />

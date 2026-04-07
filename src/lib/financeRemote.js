@@ -26,7 +26,10 @@ export function withTimeout(promise, ms, label = 'Request') {
   })
 }
 
-const UPSERT_TIMEOUT_MS = 45_000
+/** Per-attempt limit; mobile / flaky paths often need >45s. */
+const UPSERT_TIMEOUT_MS = 90_000
+const UPSERT_MAX_ATTEMPTS = 2
+const UPSERT_RETRY_DELAY_MS = 2_000
 
 /** Where email magic links should send the user (must be listed in Supabase Auth → URL Configuration). */
 function getEmailRedirectTo() {
@@ -73,28 +76,46 @@ export async function upsertFinanceData(userId, payload) {
     fdLog('[finance-dash] upsert:skip', uid, 'no-client')
     return
   }
-  try {
-    const { error } = await withTimeout(
-      supabase.from('user_finance_data').upsert(
-        {
-          user_id: userId,
-          data: payload,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'user_id' },
-      ),
-      UPSERT_TIMEOUT_MS,
-      'Cloud save',
-    )
-    if (error) {
-      fdLog('[finance-dash] upsert:postgrest-error', uid, error.message, error.code, error.details)
-      throw error
+  let lastErr
+  for (let attempt = 1; attempt <= UPSERT_MAX_ATTEMPTS; attempt++) {
+    try {
+      fdLog('[finance-dash] upsert:attempt', { uid, attempt, max: UPSERT_MAX_ATTEMPTS })
+      const { error } = await withTimeout(
+        supabase.from('user_finance_data').upsert(
+          {
+            user_id: userId,
+            data: payload,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'user_id' },
+        ),
+        UPSERT_TIMEOUT_MS,
+        'Cloud save',
+      )
+      if (error) {
+        fdLog('[finance-dash] upsert:postgrest-error', uid, error.message, error.code, error.details)
+        throw error
+      }
+      fdLog('[finance-dash] upsert:ok', uid, { attempt })
+      return
+    } catch (e) {
+      lastErr = e
+      const msg = String(e?.message || '')
+      const timedOut = msg.toLowerCase().includes('timed out')
+      const aborted = e?.name === 'AbortError' || msg.toLowerCase().includes('abort')
+      fdLog('[finance-dash] upsert:attempt-fail', { uid, attempt, message: e?.message })
+      const canRetry =
+        attempt < UPSERT_MAX_ATTEMPTS && (timedOut || aborted)
+      if (canRetry) {
+        fdLog('[finance-dash] upsert:retry', { uid, afterMs: UPSERT_RETRY_DELAY_MS })
+        await new Promise((r) => setTimeout(r, UPSERT_RETRY_DELAY_MS))
+        continue
+      }
+      fdLog('[finance-dash] upsert:threw', uid, e?.message, e?.name)
+      throw e
     }
-    fdLog('[finance-dash] upsert:ok', uid)
-  } catch (e) {
-    fdLog('[finance-dash] upsert:threw', uid, e?.message, e?.name)
-    throw e
   }
+  throw lastErr
 }
 
 export async function sendEmailOtp(email) {
