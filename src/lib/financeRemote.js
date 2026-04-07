@@ -11,6 +11,7 @@ function fdLog(...args) {
 export function withTimeout(promise, ms, label = 'Request') {
   return new Promise((resolve, reject) => {
     const id = setTimeout(() => {
+      fdLog('[finance-dash] timeout-fired', { label, ms })
       reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s. Check your connection and try again.`))
     }, ms)
     promise.then(
@@ -27,6 +28,7 @@ export function withTimeout(promise, ms, label = 'Request') {
 }
 
 /** Per-attempt limit; mobile / flaky paths often need >45s. */
+const FETCH_TIMEOUT_MS = 20_000
 const UPSERT_TIMEOUT_MS = 90_000
 const UPSERT_MAX_ATTEMPTS = 2
 const UPSERT_RETRY_DELAY_MS = 2_000
@@ -49,7 +51,11 @@ function getEmailRedirectTo() {
  */
 export async function fetchFinanceData(userId) {
   if (!supabase) return null
-  const { data, error } = await supabase.from('user_finance_data').select('data, updated_at').eq('user_id', userId).maybeSingle()
+  const { data, error } = await withTimeout(
+    supabase.from('user_finance_data').select('data, updated_at').eq('user_id', userId).maybeSingle(),
+    FETCH_TIMEOUT_MS,
+    'Cloud load',
+  )
   if (error) throw error
   return data
 }
